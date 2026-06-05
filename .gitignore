@@ -1,0 +1,32 @@
+﻿# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime state / logs
+logs/
+*.lock
+
+# Local IDE / agent state
+.idea/
+.vscode/
+.claude/
+.claude-flow/
+.codex/
+.agents/
+.mcp.json
+
+# Large model artifacts: generate/retrain on server
+Data/Models/*.joblib
+Data/Models/*.pt
+
+# OS
+.DS_Store
+Thumbs.db
