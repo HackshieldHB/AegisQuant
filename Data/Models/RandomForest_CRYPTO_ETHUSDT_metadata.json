@@ -1,0 +1,138 @@
+{
+  "feature_list": [
+    "ema_14",
+    "sma_14",
+    "macd",
+    "adx",
+    "atr",
+    "bollinger",
+    "rsi",
+    "stoch",
+    "cvd_z",
+    "flow_imbalance_z",
+    "flow_aggression_z",
+    "cvd_slope_z",
+    "imbalance_trend",
+    "imbalance_acceleration",
+    "price_cvd_correlation",
+    "flow_divergence_dist",
+    "vpin",
+    "vpin_z",
+    "1H_htf_trend",
+    "1H_htf_atr",
+    "1H_htf_vwap",
+    "4H_htf_trend",
+    "4H_htf_atr",
+    "4H_htf_vwap",
+    "mtf_volatility_regime_ratio",
+    "mtf_macro_vwap_distance",
+    "mtf_trend_alignment"
+  ],
+  "version": "2026-06-03T16:39:00.823285+00:00",
+  "global_test_accuracy": 0.5323624595469255,
+  "n_train": 2471,
+  "n_test": 618,
+  "regimes_supported": [
+    "LOW_VOL",
+    "HIGH_VOL_BULL",
+    "HIGH_VOL_BEAR"
+  ],
+  "walk_forward": {
+    "window_accuracies": [
+      0.49838187702265374,
+      0.5792880258899676,
+      0.47896440129449835
+    ],
+    "mean_accuracy": 0.5188781014023732,
+    "std_accuracy": 0.043445589138300475,
+    "consistent": true
+  },
+  "feature_importances": [
+    {
+      "feature": "mtf_volatility_regime_ratio",
+      "importance": 0.08432823194321186
+    },
+    {
+      "feature": "4H_htf_atr",
+      "importance": 0.0617110046120542
+    },
+    {
+      "feature": "stoch",
+      "importance": 0.06169939118861369
+    },
+    {
+      "feature": "rsi",
+      "importance": 0.05609699291397248
+    },
+    {
+      "feature": "1H_htf_atr",
+      "importance": 0.05568716950492334
+    },
+    {
+      "feature": "price_cvd_correlation",
+      "importance": 0.04652633911776196
+    },
+    {
+      "feature": "adx",
+      "importance": 0.0452281489249614
+    },
+    {
+      "feature": "vpin",
+      "importance": 0.044262972134785215
+    },
+    {
+      "feature": "flow_imbalance_z",
+      "importance": 0.044069901901948004
+    },
+    {
+      "feature": "macd",
+      "importance": 0.04049734393805105
+    },
+    {
+      "feature": "cvd_z",
+      "importance": 0.039013813829766916
+    },
+    {
+      "feature": "atr",
+      "importance": 0.03750705471017058
+    },
+    {
+      "feature": "vpin_z",
+      "importance": 0.036914870006771267
+    },
+    {
+      "feature": "flow_divergence_dist",
+      "importance": 0.03615320886307371
+    },
+    {
+      "feature": "mtf_macro_vwap_distance",
+      "importance": 0.03576129313975202
+    },
+    {
+      "feature": "cvd_slope_z",
+      "importance": 0.03571265683070222
+    },
+    {
+      "feature": "sma_14",
+      "importance": 0.03424315029060125
+    },
+    {
+      "feature": "1H_htf_vwap",
+      "importance": 0.03318420895044692
+    },
+    {
+      "feature": "imbalance_trend",
+      "importance": 0.03282199757918466
+    },
+    {
+      "feature": "ema_14",
+      "importance": 0.03264785572062036
+    }
+  ],
+  "low_importance_features": [
+    "mtf_trend_alignment",
+    "1H_htf_trend",
+    "4H_htf_trend",
+    "bollinger"
+  ]
+}

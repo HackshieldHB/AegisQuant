@@ -1,0 +1,25 @@
+# systemd unit for AegisQuant (VPS)
+# Install: sudo cp aegisquant.service /etc/systemd/system/ && sudo systemctl daemon-reload
+# Enable on boot: sudo systemctl enable aegisquant
+# Start: sudo systemctl start aegisquant
+# Logs: journalctl -u aegisquant -f
+
+[Unit]
+Description=AegisQuant AI Trading Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aegis
+WorkingDirectory=/opt/aegisquant
+EnvironmentFile=/opt/aegisquant/.env
+ExecStart=/opt/aegisquant/.venv/bin/python Main_Async.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aegisquant
+
+[Install]
+WantedBy=multi-user.target
