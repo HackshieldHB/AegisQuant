@@ -240,10 +240,19 @@ class AsyncEngine:
             )
 
         # ── ModelHealthMonitor — live anomaly detection ───────────────
-        try:
-            from Execution.ModelHealthMonitor import ModelHealthMonitor as _MHM
-            self.model_health = _MHM()
-        except Exception:
+        if CONFIG.get("MODEL_HEALTH", {}).get("ENABLED", True):
+            try:
+                from Execution.ModelHealthMonitor import ModelHealthMonitor as _MHM
+                _mh_cfg = CONFIG.get("MODEL_HEALTH", {})
+                self.model_health = _MHM(
+                    min_signal_rate=int(_mh_cfg.get("MIN_SIGNAL_RATE", 5)),
+                    signal_rate_window=int(_mh_cfg.get("SIGNAL_RATE_WINDOW", 100)),
+                    prob_compression_threshold=float(_mh_cfg.get("PROB_COMPRESSION_THRESHOLD", 0.05)),
+                    max_meta_rejection_rate=float(_mh_cfg.get("MAX_META_REJECTION_RATE", 0.80)),
+                )
+            except Exception:
+                self.model_health = None
+        else:
             self.model_health = None
 
         strategies = [

@@ -381,7 +381,8 @@ TRADING_SESSIONS = {
 # Weights should sum to 1.0.
 # ==================================================
 ENSEMBLE = {
-    "ENABLED": True,
+    "ENABLED": str(os.getenv("ENSEMBLE_ENABLED", "True")).lower() == "true",
+    "SINGLE_MODEL_TYPE": os.getenv("SINGLE_MODEL_TYPE", "RF").upper(),
     "RF_WEIGHT":  0.40,    # Random Forest
     "XGB_WEIGHT": 0.35,    # XGBoost
     "LGB_WEIGHT": 0.25,    # LightGBM
@@ -549,6 +550,17 @@ AUTO_RETRAIN = {
     "LOCK_FILE":       os.path.join(os.getcwd(), "logs", "last_retrain.json"),
 }
 
+# ==================================================
+# MODEL HEALTH - live anomaly detection thresholds
+# ==================================================
+MODEL_HEALTH = {
+    "ENABLED": str(os.getenv("MODEL_HEALTH_ENABLED", "True")).lower() == "true",
+    "MIN_SIGNAL_RATE": int(os.getenv("MODEL_HEALTH_MIN_SIGNALS", "2")),
+    "SIGNAL_RATE_WINDOW": int(os.getenv("MODEL_HEALTH_SIGNAL_WINDOW", "400")),
+    "PROB_COMPRESSION_THRESHOLD": float(os.getenv("MODEL_HEALTH_PROB_VAR", "0.00005")),
+    "MAX_META_REJECTION_RATE": float(os.getenv("MODEL_HEALTH_MAX_REJECT", "0.95")),
+}
+
 CONFIG = {
     "PROJECT": PROJECT,
     "MARKETS": MARKETS,
@@ -586,6 +598,7 @@ CONFIG = {
     "LSTM_MODEL":     LSTM_MODEL,
     "ALPHA_DECAY":    ALPHA_DECAY,
     "AUTO_RETRAIN":   AUTO_RETRAIN,
+    "MODEL_HEALTH":   MODEL_HEALTH,
 }
 
 # ==================================================

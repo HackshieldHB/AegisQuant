@@ -24,10 +24,14 @@ from joblib import load
 from AegisQuantConfig import CONFIG
 from Core.Logger import AG_LOGGER
 
-try:
-    from AI.LSTMModel import AegisLSTM as _AegisLSTM
-    _LSTM_AVAILABLE = True
-except ImportError:
+if CONFIG.get("LSTM_MODEL", {}).get("ENABLED", True):
+    try:
+        from AI.LSTMModel import AegisLSTM as _AegisLSTM
+        _LSTM_AVAILABLE = True
+    except ImportError:
+        _LSTM_AVAILABLE = False
+else:
+    _AegisLSTM = None
     _LSTM_AVAILABLE = False
 
 logger = AG_LOGGER
@@ -249,10 +253,22 @@ def load_model(sector: str, symbol: str):
             return ensemble
 
     # ── Single-model fallback ──────────────────────────────────────────
-    candidates = [
-        os.path.join(MODEL_DIR, f"{base}_GLOBAL.joblib"),
-        os.path.join(MODEL_DIR, f"{base}.joblib"),
+    preferred_type = str(ensemble_cfg.get("SINGLE_MODEL_TYPE", "RF")).upper()
+    preferred_suffix = {
+        "RF": "_GLOBAL.joblib",
+        "XGB": "_XGB.joblib",
+        "LGB": "_LGB.joblib",
+    }.get(preferred_type, "_GLOBAL.joblib")
+    candidate_suffixes = [
+        preferred_suffix,
+        "_GLOBAL.joblib",
+        ".joblib",
     ]
+    candidates = []
+    for suffix in candidate_suffixes:
+        path = os.path.join(MODEL_DIR, f"{base}{suffix}")
+        if path not in candidates:
+            candidates.append(path)
 
     for path in candidates:
         if not os.path.exists(path):

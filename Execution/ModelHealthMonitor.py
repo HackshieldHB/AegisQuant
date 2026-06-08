@@ -17,7 +17,6 @@ class ModelHealthMonitor:
                  prob_compression_threshold: float = 0.05,
                  max_regime_stickiness_bars: int = 2016, # ~14 days at 10m bars
                  max_meta_rejection_rate: float = 0.80):
-                     
         self.min_signal_rate = min_signal_rate
         self.signal_rate_window = signal_rate_window
         self.max_directional_imbalance = max_directional_imbalance
