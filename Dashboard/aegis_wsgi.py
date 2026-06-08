@@ -1,4 +1,6 @@
 import csv
+import hashlib
+import hmac
 import html
 import json
 import os
@@ -17,6 +19,28 @@ HEARTBEAT_FILE = os.path.join(LOG_DIR, "engine_heartbeat.json")
 IDR_RATE = 16000
 START_IDR = 300000
 TARGET_IDR = 10000000
+
+
+def _env_value(name):
+    path = os.path.join(APP_ROOT, ".env")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key.strip() == name:
+                    return value.strip().strip("\"'")
+    except Exception:
+        pass
+    return os.getenv(name, "")
+
+
+def _authorized(environ):
+    expected = _env_value("AEGIS_DASHBOARD_TOKEN")
+    supplied = environ.get("HTTP_X_AEGIS_TOKEN", "")
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
 
 
 def _json(path, default):
@@ -98,7 +122,55 @@ def _trades():
             pnl_values.append(0.0)
     wins = sum(1 for value in pnl_values if value > 0)
     losses = sum(1 for value in pnl_values if value < 0)
-    return rows[-20:], {"count": len(rows), "pnl": sum(pnl_values), "wins": wins, "losses": losses}
+    return rows, {"count": len(rows), "pnl": sum(pnl_values), "wins": wins, "losses": losses}
+
+
+def _trade_analytics(rows):
+    daily = {}
+    symbols = {}
+    equity = []
+    cumulative = 0.0
+    for index, row in enumerate(rows):
+        raw_pnl = row.get("PnL") or row.get("pnl") or 0
+        try:
+            pnl = float(raw_pnl)
+        except Exception:
+            pnl = 0.0
+        raw_ts = row.get("Timestamp") or row.get("timestamp") or ""
+        day = str(raw_ts)[:10] or "unknown"
+        symbol = row.get("Symbol") or row.get("symbol") or "UNKNOWN"
+        daily[day] = daily.get(day, 0.0) + pnl
+        stats = symbols.setdefault(symbol, {"symbol": symbol, "trades": 0, "wins": 0, "pnl": 0.0})
+        stats["trades"] += 1
+        stats["wins"] += int(pnl > 0)
+        stats["pnl"] += pnl
+        cumulative += pnl
+        equity.append({"index": index + 1, "timestamp": raw_ts, "pnl": round(cumulative, 8)})
+    daily_rows = [{"date": day, "pnl": round(value, 8)} for day, value in sorted(daily.items())]
+    symbol_rows = []
+    for stats in symbols.values():
+        stats["win_rate"] = round(stats["wins"] / max(1, stats["trades"]) * 100, 2)
+        stats["pnl"] = round(stats["pnl"], 8)
+        symbol_rows.append(stats)
+    symbol_rows.sort(key=lambda item: item["pnl"], reverse=True)
+    return daily_rows[-90:], symbol_rows, equity[-200:]
+
+
+def _recommendations(snapshot):
+    items = []
+    if not snapshot["engine_ok"] or not snapshot["watchdog_ok"]:
+        items.append({"level": "critical", "title": "Runtime process missing", "detail": "Restore WatchdogSupervisor and Main.py before accepting signals."})
+    if snapshot["heartbeat_age_sec"] is None or snapshot["heartbeat_age_sec"] > 1800:
+        items.append({"level": "critical", "title": "Heartbeat stale", "detail": "Engine cycle has not reported within the expected 30-minute window."})
+    if snapshot["cycles"]["last_candidates"] == 0:
+        items.append({"level": "info", "title": "No qualified setup", "detail": "The latest scan produced no candidate. Keep risk gates intact; do not force an entry."})
+    if snapshot["balance_usdt"] < 25:
+        items.append({"level": "warning", "title": "Micro-account constraints", "detail": "Fees and minimum notional materially affect trade selection below 25 USDT."})
+    if snapshot["model_alerts"]:
+        items.append({"level": "warning", "title": "Review model drift", "detail": "Recent model-health alerts were detected. Compare live confidence distribution with training metadata."})
+    if not items:
+        items.append({"level": "success", "title": "System nominal", "detail": "Runtime, heartbeat, and recent logs are healthy."})
+    return items
 
 
 def _snapshot():
@@ -109,6 +181,7 @@ def _snapshot():
     watch_text = _tail(WATCHDOG_LOG, 30000)
     process = _processes()
     trades, trade_stats = _trades()
+    daily_pnl, symbol_stats, equity_curve = _trade_analytics(trades)
 
     hb_ts = float(heartbeat.get("ts") or 0)
     hb_age = time.time() - hb_ts if hb_ts else None
@@ -128,7 +201,7 @@ def _snapshot():
     health = "OK" if engine_ok and watchdog_ok and heartbeat_ok else "WARN"
     if model_alerts:
         health = "MODEL WATCH"
-    return {
+    snapshot = {
         "health": health,
         "engine_ok": engine_ok,
         "watchdog_ok": watchdog_ok,
@@ -146,8 +219,13 @@ def _snapshot():
         "process": process,
         "trades": trades,
         "trade_stats": trade_stats,
+        "daily_pnl": daily_pnl,
+        "symbol_stats": symbol_stats,
+        "equity_curve": equity_curve,
         "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
+    snapshot["recommendations"] = _recommendations(snapshot)
+    return snapshot
 
 
 def _e(value):
@@ -230,9 +308,32 @@ ul{{margin:0;padding-left:18px;color:var(--muted)}}li{{margin:7px 0}}pre{{white-
 
 
 def application(environ, start_response):
-    if environ.get("PATH_INFO", "/") == "/health":
-        body = json.dumps(_snapshot(), separators=(",", ":")).encode("utf-8")
+    path = environ.get("PATH_INFO", "/")
+    if path == "/health":
+        snapshot = _snapshot()
+        public_health = {
+            "status": "ok" if snapshot["health"] == "OK" else "degraded",
+            "service": "aegisquant-web",
+            "engine": snapshot["engine_ok"],
+            "watchdog": snapshot["watchdog_ok"],
+        }
+        body = json.dumps(public_health, separators=(",", ":")).encode("utf-8")
         start_response("200 OK", [("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+        return [body]
+    if path == "/api/dashboard":
+        if not _authorized(environ):
+            body = b'{"error":"unauthorized"}'
+            start_response("401 Unauthorized", [("Content-Type", "application/json"), ("Content-Length", str(len(body)))])
+            return [body]
+        body = json.dumps(_snapshot(), separators=(",", ":")).encode("utf-8")
+        start_response(
+            "200 OK",
+            [
+                ("Content-Type", "application/json"),
+                ("Cache-Control", "no-store"),
+                ("Content-Length", str(len(body))),
+            ],
+        )
         return [body]
     body = render_page().encode("utf-8")
     start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body)))])
