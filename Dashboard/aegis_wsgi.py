@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.request
 from datetime import datetime, timezone
 
 APP_ROOT = os.path.expanduser("~/aegisquant_app")
@@ -19,6 +20,8 @@ HEARTBEAT_FILE = os.path.join(LOG_DIR, "engine_heartbeat.json")
 IDR_RATE = 16000
 START_IDR = 300000
 TARGET_IDR = 10000000
+MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SHIBUSDT", "PEPEUSDT")
+_MARKET_CACHE = {"ts": 0.0, "rows": []}
 
 
 def _env_value(name):
@@ -156,6 +159,36 @@ def _trade_analytics(rows):
     return daily_rows[-90:], symbol_rows, equity[-200:]
 
 
+def _market_snapshot():
+    if time.time() - _MARKET_CACHE["ts"] < 20 and _MARKET_CACHE["rows"]:
+        return _MARKET_CACHE["rows"]
+    try:
+        request = urllib.request.Request(
+            "https://api.binance.com/api/v3/ticker/24hr",
+            headers={"User-Agent": "AegisQuant-Dashboard/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=4) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        wanted = set(MARKET_SYMBOLS)
+        rows = []
+        for item in payload:
+            if item.get("symbol") not in wanted:
+                continue
+            rows.append({
+                "symbol": item["symbol"].replace("USDT", "/USDT"),
+                "price": float(item.get("lastPrice") or 0),
+                "change": float(item.get("priceChangePercent") or 0),
+                "high": float(item.get("highPrice") or 0),
+                "low": float(item.get("lowPrice") or 0),
+                "volume": float(item.get("quoteVolume") or 0),
+            })
+        rows.sort(key=lambda row: MARKET_SYMBOLS.index(row["symbol"].replace("/", "")))
+        _MARKET_CACHE.update({"ts": time.time(), "rows": rows})
+    except Exception:
+        pass
+    return _MARKET_CACHE["rows"]
+
+
 def _recommendations(snapshot):
     items = []
     if not snapshot["engine_ok"] or not snapshot["watchdog_ok"]:
@@ -222,6 +255,7 @@ def _snapshot():
         "daily_pnl": daily_pnl,
         "symbol_stats": symbol_stats,
         "equity_curve": equity_curve,
+        "market": _market_snapshot(),
         "updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
     snapshot["recommendations"] = _recommendations(snapshot)
@@ -244,45 +278,42 @@ def _safe_json(data):
 def render_page():
     s = _snapshot()
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AegisQuant Live Dashboard</title>
+<title>AegisQuant Terminal</title><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
 <style>
-:root{--bg:#070a12;--panel:#101622;--panel2:#151d2c;--line:#263246;--text:#edf3ff;--muted:#8d9ab5;--teal:#5ef4d3;--blue:#7aa2ff;--green:#44d48c;--red:#ff667d;--yellow:#ffd166}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#142338 0,#070a12 42%,#06080d 100%);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
-.wrap{max-width:1360px;margin:0 auto;padding:24px}.hero{display:grid;grid-template-columns:1.35fr .65fr;gap:18px;align-items:stretch}.panel{background:linear-gradient(180deg,rgba(21,29,44,.96),rgba(12,17,27,.96));border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 60px rgba(0,0,0,.24)}
-.title{padding:26px}.eyebrow{color:var(--teal);font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.title h1{margin:10px 0 8px;font-size:42px;line-height:1;letter-spacing:0}.title p{margin:0;color:var(--muted);max-width:780px}.status{padding:22px}.statusTop{display:flex;justify-content:space-between;gap:12px;align-items:center}.badge{border:1px solid var(--line);border-radius:999px;padding:8px 12px;font-size:12px;font-weight:900}.ok{color:var(--teal);background:rgba(94,244,211,.08)}.warn{color:var(--yellow);background:rgba(255,209,102,.08)}.bad{color:var(--red);background:rgba(255,102,125,.08)}
-.ring{width:142px;height:142px;border-radius:50%;margin:20px auto 10px;background:conic-gradient(var(--teal) calc(var(--p)*1%),#223047 0);display:grid;place-items:center}.ring div{width:104px;height:104px;border-radius:50%;background:#0e1420;display:grid;place-items:center;text-align:center}.ring strong{font-size:25px}.ring span{display:block;color:var(--muted);font-size:11px}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.card{padding:15px;background:rgba(16,22,34,.9);border:1px solid var(--line);border-radius:8px}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.value{margin-top:8px;font-size:23px;font-weight:900}.sub{color:var(--muted);font-size:12px;margin-top:4px}
-.tabs{position:sticky;top:0;z-index:5;display:flex;gap:8px;flex-wrap:wrap;background:rgba(7,10,18,.9);backdrop-filter:blur(10px);padding:14px 0}.tabBtn{border:1px solid var(--line);background:#0f1624;color:var(--muted);border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}.tabBtn.active{color:#06100d;background:var(--teal);border-color:var(--teal)}
-.tab{display:none}.tab.active{display:block}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.section{padding:17px;margin-bottom:14px}.section h2{margin:0 0 12px;font-size:18px}.rec{display:grid;gap:10px}.recItem{border-left:4px solid var(--blue);background:#0c1320;border-radius:8px;padding:12px}.recItem.critical{border-color:var(--red)}.recItem.warning{border-color:var(--yellow)}.recItem.success{border-color:var(--green)}.recItem strong{display:block}.recItem span{color:var(--muted);font-size:13px}
-canvas{width:100%;height:260px;background:#0b111d;border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}tr:hover td{background:rgba(94,244,211,.04)}.pos{color:var(--green)}.neg{color:var(--red)}pre{white-space:pre-wrap;color:var(--muted);font-size:12px;margin:0}.foot{color:var(--muted);font-size:12px;text-align:center;padding:18px}
-@media(max-width:900px){.hero,.grid2{grid-template-columns:1fr}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.title h1{font-size:34px}}@media(max-width:560px){.wrap{padding:14px}.cards{grid-template-columns:1fr}.tabBtn{flex:1}.title h1{font-size:29px}}
-</style></head><body><main class="wrap">
-<section class="hero"><div class="panel title"><div class="eyebrow">AegisQuant Production</div><h1>Live Trading Command Center</h1><p>Root dashboard for aegisquant.web.id. Lightweight cPanel-safe UI with runtime health, growth target, signal scan, PnL analytics, and my recommendation panel.</p></div>
-<aside class="panel status"><div class="statusTop"><span class="label">System Status</span><span id="healthBadge" class="badge">...</span></div><div id="growthRing" class="ring"><div><strong id="growthPct">0%</strong><span>Growth Target</span></div></div><div class="sub" id="updatedAt"></div></aside></section>
-<section class="cards" id="cards"></section>
-<nav class="tabs"><button class="tabBtn active" data-tab="overview">Overview</button><button class="tabBtn" data-tab="markets">Markets</button><button class="tabBtn" data-tab="performance">Performance</button><button class="tabBtn" data-tab="trades">Trades</button><button class="tabBtn" data-tab="system">System</button></nav>
-<section id="overview" class="tab active"><div class="grid2"><div class="panel section"><h2>My Recommendation</h2><div id="recommendations" class="rec"></div></div><div class="panel section"><h2>Equity Curve</h2><canvas id="equityChart"></canvas></div></div><div class="panel section"><h2>Latest Symbol Scan</h2><div id="scanTable"></div></div></section>
-<section id="markets" class="tab"><div class="grid2"><div class="panel section"><h2>Symbol Performance</h2><canvas id="symbolChart"></canvas></div><div class="panel section"><h2>Symbol Stats</h2><div id="symbolTable"></div></div></div></section>
-<section id="performance" class="tab"><div class="grid2"><div class="panel section"><h2>Daily PnL</h2><canvas id="dailyChart"></canvas></div><div class="panel section"><h2>Risk Notes</h2><div id="riskNotes" class="rec"></div></div></div></section>
-<section id="trades" class="tab"><div class="panel section"><h2>Trade History</h2><div id="tradeTable"></div></div></section>
-<section id="system" class="tab"><div class="grid2"><div class="panel section"><h2>Runtime Errors</h2><div id="errors"></div></div><div class="panel section"><h2>Processes</h2><pre id="processes"></pre></div></div><div class="panel section"><h2>Model Health</h2><div id="modelAlerts"></div></div></section>
-<div class="foot">Auto refresh every 30 seconds. Protected JSON remains available at /api/dashboard for Vercel or private clients.</div>
+:root{--bg:#05070b;--ink:#eef4ff;--muted:#8793aa;--panel:#0b111b;--panel2:#101827;--line:#263247;--cyan:#00e5c3;--gold:#f7c948;--green:#16c784;--red:#ea3943;--blue:#6ea8ff}
+*{box-sizing:border-box}body{margin:0;background:#05070b;color:var(--ink);font-family:Inter,Segoe UI,Arial,sans-serif;letter-spacing:0}body:before{content:"";position:fixed;inset:0;background:radial-gradient(circle at 15% 0,#15385a88,transparent 34%),radial-gradient(circle at 90% 10%,#1b3f2f88,transparent 28%),linear-gradient(180deg,#07111e,#05070b 38%);pointer-events:none}
+.shell{position:relative;max-width:1480px;margin:0 auto;padding:18px}.top{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:stretch}.brand{border:1px solid #30405a;background:linear-gradient(135deg,#101827,#07101c);border-radius:8px;padding:20px}.eyebrow{color:var(--gold);font-size:11px;font-weight:900;letter-spacing:.18em;text-transform:uppercase}.brand h1{font-size:44px;line-height:.95;margin:8px 0 9px}.brand p{margin:0;color:var(--muted);max-width:920px}.status{min-width:300px;border:1px solid #30405a;border-radius:8px;background:#090f18;padding:18px}.badge{display:inline-flex;border-radius:999px;border:1px solid #30405a;padding:7px 10px;font-size:12px;font-weight:900}.ok{color:var(--cyan);background:#00e5c315}.warn{color:var(--gold);background:#f7c94815}.bad{color:var(--red);background:#ea394315}
+.ticker{display:flex;gap:8px;overflow:hidden;margin:12px 0}.tick{min-width:170px;border:1px solid #263247;background:#09111d;border-radius:7px;padding:10px}.tick b{display:block}.tick span{font-size:12px}.pos{color:var(--green)}.neg{color:var(--red)}.muted{color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px}.card{background:linear-gradient(180deg,#101827,#0a1019);border:1px solid #263247;border-radius:7px;padding:13px}.label{font-size:10px;color:var(--muted);font-weight:900;text-transform:uppercase;letter-spacing:.12em}.value{font-size:24px;font-weight:950;margin-top:7px}.sub{font-size:12px;color:var(--muted);margin-top:3px}.layout{display:grid;grid-template-columns:1.35fr .65fr;gap:12px;margin-top:12px}.panel{background:#090f18;border:1px solid #263247;border-radius:8px;padding:14px}.panel h2{margin:0 0 12px;font-size:17px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.chart{height:280px}.heat{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}.heatCell{min-height:86px;border-radius:7px;padding:10px;border:1px solid #263247;background:#101827}.heatCell b{font-size:14px}.heatCell strong{display:block;font-size:21px;margin-top:10px}
+.rec{display:grid;gap:9px}.recItem{border:1px solid #263247;border-left:4px solid var(--blue);background:#0d1522;border-radius:7px;padding:11px}.recItem.critical{border-left-color:var(--red)}.recItem.warning{border-left-color:var(--gold)}.recItem.success{border-left-color:var(--green)}.recItem strong{display:block}.recItem span{display:block;color:var(--muted);font-size:13px;margin-top:3px}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #1d293c;padding:8px;text-align:left;vertical-align:top}th{color:#9aa8bf;font-size:10px;text-transform:uppercase;letter-spacing:.1em}tr:hover td{background:#101827}.terminal{font-family:Consolas,Menlo,monospace;font-size:12px;color:#aebbd1}.bar{height:9px;background:#172235;border-radius:999px;overflow:hidden;margin-top:10px}.fill{height:100%;background:linear-gradient(90deg,var(--cyan),var(--green));width:0}.foot{text-align:center;color:var(--muted);font-size:12px;padding:16px}
+@media(max-width:1120px){.layout,.grid2,.top{grid-template-columns:1fr}.cards{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.shell{padding:10px}.brand h1{font-size:32px}.cards,.heat{grid-template-columns:1fr 1fr}.status{min-width:0}}
+</style></head><body><main class="shell">
+<section class="top"><div class="brand"><div class="eyebrow">AegisQuant / Live Production Terminal</div><h1>Trading Desk Monitor</h1><p>Actual engine logs, Binance 24h market data, closed PnL analytics, model alerts, and my operating recommendation in one root dashboard.</p></div><aside class="status"><div id="healthBadge" class="badge">LOADING</div><div class="value" id="growthPct">0%</div><div class="sub">Growth target: Rp 300,000 to Rp 10,000,000</div><div class="bar"><div id="growthFill" class="fill"></div></div><div class="sub" id="updatedAt"></div></aside></section>
+<section class="ticker" id="ticker"></section><section class="cards" id="cards"></section>
+<section class="layout"><div><div class="grid2"><section class="panel"><h2>Strategy Equity</h2><canvas id="equityChart" class="chart"></canvas></section><section class="panel"><h2>Daily PnL Pulse</h2><canvas id="dailyChart" class="chart"></canvas></section></div><section class="panel" style="margin-top:12px"><h2>Latest Signal Tape</h2><div id="scanTable"></div></section><section class="panel" style="margin-top:12px"><h2>Trade Blotter</h2><div id="tradeTable"></div></section></div>
+<aside><section class="panel"><h2>My Recommendation</h2><div id="recommendations" class="rec"></div></section><section class="panel" style="margin-top:12px"><h2>Market Heatmap</h2><div id="heatmap" class="heat"></div></section><section class="panel" style="margin-top:12px"><h2>Symbol Edge Board</h2><canvas id="symbolChart" class="chart"></canvas></section></aside></section>
+<section class="grid2" style="margin-top:12px"><div class="panel"><h2>Model / Runtime Alerts</h2><div id="alerts"></div></div><div class="panel"><h2>Process Monitor</h2><pre id="processes" class="terminal"></pre></div></section>
+<div class="foot">Root dashboard refreshes every 30 seconds. Private JSON API remains protected at /api/dashboard.</div>
 </main><script id="aegis-data" type="application/json">__DATA__</script><script>
-const s=JSON.parse(document.getElementById("aegis-data").textContent);const $=id=>document.getElementById(id);const money=n=>"$"+Number(n||0).toFixed(4);const idr=n=>"Rp "+Number(n||0).toLocaleString("id-ID",{maximumFractionDigits:0});const pct=n=>Number(n||0).toFixed(2)+"%";
-function cls(v){return Number(v||0)>=0?"pos":"neg"}function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
-function table(headers,rows,empty){if(!rows.length)return "<div class='sub'>"+empty+"</div>";return "<table><thead><tr>"+headers.map(h=>"<th>"+h+"</th>").join("")+"</tr></thead><tbody>"+rows.join("")+"</tbody></table>"}
+const s=JSON.parse(document.getElementById("aegis-data").textContent),$=id=>document.getElementById(id);
+const money=n=>"$"+Number(n||0).toFixed(4),idr=n=>"Rp "+Number(n||0).toLocaleString("id-ID",{maximumFractionDigits:0}),pct=n=>Number(n||0).toFixed(2)+"%",cls=v=>Number(v||0)>=0?"pos":"neg";
+const esc=v=>String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));
+function table(h,r,e){return r.length?`<table><thead><tr>${h.map(x=>`<th>${x}</th>`).join("")}</tr></thead><tbody>${r.join("")}</tbody></table>`:`<div class="sub">${e}</div>`}
 function card(k,v,sub){return `<div class="card"><div class="label">${k}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`}
-function drawLine(id,pts,color="#5ef4d3"){const c=$(id),x=c.getContext("2d"),w=c.width=c.offsetWidth*2,h=c.height=260*2;x.clearRect(0,0,w,h);x.strokeStyle="#263246";x.lineWidth=2;for(let i=1;i<5;i++){x.beginPath();x.moveTo(0,h*i/5);x.lineTo(w,h*i/5);x.stroke()}if(!pts.length)return;const vals=pts.map(Number),mn=Math.min(...vals,0),mx=Math.max(...vals,0),span=mx-mn||1;x.beginPath();vals.forEach((v,i)=>{const px=i/(vals.length-1||1)*w,py=h-((v-mn)/span*h*.82+h*.09);i?x.lineTo(px,py):x.moveTo(px,py)});x.strokeStyle=color;x.lineWidth=5;x.stroke()}
-function drawBars(id,rows,key="pnl"){const c=$(id),x=c.getContext("2d"),w=c.width=c.offsetWidth*2,h=c.height=260*2;x.clearRect(0,0,w,h);if(!rows.length)return;const vals=rows.map(r=>Number(r[key]||0)),mx=Math.max(...vals.map(Math.abs),.01),bw=w/vals.length*.72;rows.forEach((r,i)=>{const v=Number(r[key]||0),bh=Math.abs(v)/mx*h*.42,base=h*.52;x.fillStyle=v>=0?"#44d48c":"#ff667d";x.fillRect(i*w/vals.length+(w/vals.length-bw)/2,v>=0?base-bh:base,bw,bh)})}
-function render(){const t=s.trade_stats||{},c=s.cycles||{},wr=t.wins/Math.max(1,(t.wins||0)+(t.losses||0))*100,b=s.health==="OK"?"ok":s.health==="MODEL WATCH"?"warn":"bad";$("healthBadge").className="badge "+b;$("healthBadge").textContent=s.health;$("growthRing").style.setProperty("--p",Math.max(0,Math.min(100,s.growth_pct||0)));$("growthPct").textContent=pct(s.growth_pct);$("updatedAt").textContent="Updated "+s.updated_utc;
-$("cards").innerHTML=[card("Balance",money(s.balance_usdt),idr(s.balance_idr)),card("Growth",pct(s.growth_pct),"Rp 300rb to Rp 10jt"),card("Cycle","#"+(s.heartbeat_cycle??"-"),"Heartbeat "+(s.heartbeat_age_sec??"-")+"s"),card("Last Scan",(c.last_candidates||0)+" / "+(c.last_executed||0),"Candidates / executed"),card("Trades",t.count||0,"Win rate "+wr.toFixed(1)+"%"),card("Closed PnL",`<span class="${cls(t.pnl)}">${money(t.pnl)}</span>`,"From trade log"),card("Positions",s.positions||0,"Open exposure"),card("Revision",s.git_rev||"unknown",s.engine_ok&&s.watchdog_ok?"Runtime online":"Check runtime")].join("");
+function renderShell(){const t=s.trade_stats||{},c=s.cycles||{},wr=(t.wins||0)/Math.max(1,(t.wins||0)+(t.losses||0))*100,b=s.health==="OK"?"ok":s.health==="MODEL WATCH"?"warn":"bad";$("healthBadge").className="badge "+b;$("healthBadge").textContent=s.health;$("growthPct").textContent=pct(s.growth_pct);$("growthFill").style.width=Math.max(0,Math.min(100,s.growth_pct||0))+"%";$("updatedAt").textContent="Updated "+s.updated_utc;
+$("ticker").innerHTML=(s.market||[]).map(m=>`<div class="tick"><b>${esc(m.symbol)}</b><span>${Number(m.price).toLocaleString("en-US",{maximumFractionDigits:m.price<1?8:2})}</span><span class="${cls(m.change)}"> ${pct(m.change)}</span></div>`).join("")||"<div class='sub'>Live Binance ticker unavailable.</div>";
+$("cards").innerHTML=[card("USDT Balance",money(s.balance_usdt),idr(s.balance_idr)),card("Growth",pct(s.growth_pct),"Target runway"),card("Cycle","#"+(s.heartbeat_cycle??"-"),"Heartbeat "+(s.heartbeat_age_sec??"-")+"s"),card("Candidates",(c.last_candidates||0)+" / "+(c.last_executed||0),"Last scan / executed"),card("Trades",t.count||0,"Win rate "+wr.toFixed(1)+"%"),card("Closed PnL",`<span class="${cls(t.pnl)}">${money(t.pnl)}</span>`,"Actual trade log")].join("");
 $("recommendations").innerHTML=(s.recommendations||[]).map(r=>`<div class="recItem ${esc(r.level)}"><strong>${esc(r.title)}</strong><span>${esc(r.detail)}</span></div>`).join("");
-$("riskNotes").innerHTML=[["warning","Micro sizing","Below 25 USDT, exchange minimum notional and fees can dominate edge."],["success","Best setup bias","Keep capital rotation conservative: only rotate for a clearly stronger edge."],["warning","Security","Rotate API/cPanel keys after deployment hardening because credentials were shared during setup."]].map(r=>`<div class="recItem ${r[0]}"><strong>${r[1]}</strong><span>${r[2]}</span></div>`).join("");
-$("scanTable").innerHTML=table(["Time","Symbol","Signal","Confidence","Reason"],(s.scan_rows||[]).slice().reverse().map(r=>`<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td><td>${esc(r[3])}%</td><td>${esc(r[4])}</td></tr>`),"No scan rows yet.");
-$("tradeTable").innerHTML=table(["Time","Symbol","Side/Result","PnL","Confidence"],(s.trades||[]).slice(-60).reverse().map(r=>{const p=Number(r.PnL||r.pnl||0);return `<tr><td>${esc(r.Timestamp||r.timestamp||"")}</td><td>${esc(r.Symbol||r.symbol||"")}</td><td>${esc(r.Side||r.side||r.Result||"")}</td><td class="${cls(p)}">${p.toFixed(6)}</td><td>${esc(r.Confidence||r.confidence||"")}</td></tr>`}),"No trades logged yet.");
-$("symbolTable").innerHTML=table(["Symbol","Trades","Win Rate","PnL"],(s.symbol_stats||[]).map(r=>`<tr><td>${esc(r.symbol)}</td><td>${r.trades}</td><td>${pct(r.win_rate)}</td><td class="${cls(r.pnl)}">${money(r.pnl)}</td></tr>`),"No symbol stats yet.");
-$("errors").innerHTML=(s.errors||[]).length?table(["Recent Error"],s.errors.map(e=>`<tr><td>${esc(String(e).slice(-280))}</td></tr>`),""):"<div class='sub'>No recent runtime errors.</div>";$("modelAlerts").innerHTML=(s.model_alerts||[]).length?table(["Model Alert"],s.model_alerts.map(e=>`<tr><td>${esc(String(e).slice(-280))}</td></tr>`),""):"<div class='sub'>No recent model-health alerts.</div>";$("processes").textContent=(s.process||[]).join("\\n")||"No engine processes found";
-drawLine("equityChart",(s.equity_curve||[]).map(r=>r.pnl));drawBars("dailyChart",(s.daily_pnl||[]).slice(-45));drawBars("symbolChart",(s.symbol_stats||[]).slice(0,10));}
-document.querySelectorAll(".tabBtn").forEach(btn=>btn.onclick=()=>{document.querySelectorAll(".tabBtn,.tab").forEach(e=>e.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");setTimeout(render,40)});render();setTimeout(()=>location.reload(),30000);
+$("heatmap").innerHTML=(s.market||[]).map(m=>{const ch=Number(m.change||0),a=Math.min(Math.abs(ch)/8,.85),bg=ch>=0?`rgba(22,199,132,${.12+a*.55})`:`rgba(234,57,67,${.12+a*.55})`;return `<div class="heatCell" style="background:${bg}"><b>${esc(m.symbol)}</b><span class="muted">${Number(m.price).toLocaleString("en-US",{maximumFractionDigits:m.price<1?8:2})}</span><strong class="${cls(ch)}">${pct(ch)}</strong></div>`}).join("");
+$("scanTable").innerHTML=table(["Time","Pair","Signal","Conf","Reason"],(s.scan_rows||[]).slice().reverse().map(r=>`<tr><td>${esc(r[0])}</td><td><b>${esc(r[1])}</b></td><td>${esc(r[2])}</td><td>${esc(r[3])}%</td><td>${esc(r[4])}</td></tr>`),"No scan rows yet.");
+$("tradeTable").innerHTML=table(["Time","Symbol","Side","PnL","Conf"],(s.trades||[]).slice(-42).reverse().map(r=>{const p=Number(r.PnL||r.pnl||0);return `<tr><td>${esc(r.Timestamp||r.timestamp||"")}</td><td><b>${esc(r.Symbol||r.symbol||"")}</b></td><td>${esc(r.Side||r.side||r.Result||"")}</td><td class="${cls(p)}">${p.toFixed(6)}</td><td>${esc(r.Confidence||r.confidence||"")}</td></tr>`}),"No trades logged yet.");
+const allAlerts=[...(s.model_alerts||[]),...(s.errors||[])].slice(-12);$("alerts").innerHTML=allAlerts.length?table(["Latest Alert"],allAlerts.map(e=>`<tr><td class="terminal">${esc(String(e).slice(-320))}</td></tr>`),""):"<div class='sub'>No recent model or runtime alerts.</div>";$("processes").textContent=(s.process||[]).join("\\n")||"No engine processes found";}
+function makeCharts(){if(!window.Chart)return;Chart.defaults.color="#9aa8bf";Chart.defaults.borderColor="#263247";const equity=(s.equity_curve||[]).map(r=>Number(r.pnl||0)),daily=(s.daily_pnl||[]).slice(-45),sym=(s.symbol_stats||[]).slice(0,10);
+new Chart($("equityChart"),{type:"line",data:{labels:equity.map((_,i)=>i+1),datasets:[{data:equity,borderColor:"#00e5c3",backgroundColor:"rgba(0,229,195,.16)",fill:true,tension:.35,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{callback:v=>"$"+v}}}}});
+new Chart($("dailyChart"),{type:"bar",data:{labels:daily.map(r=>r.date),datasets:[{data:daily.map(r=>r.pnl),backgroundColor:daily.map(r=>Number(r.pnl)>=0?"#16c784":"#ea3943"),borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{callback:v=>"$"+v}}}}});
+new Chart($("symbolChart"),{type:"bar",data:{labels:sym.map(r=>r.symbol),datasets:[{label:"PnL",data:sym.map(r=>r.pnl),backgroundColor:sym.map(r=>Number(r.pnl)>=0?"#16c784":"#ea3943"),borderRadius:5},{label:"Win %",data:sym.map(r=>r.win_rate/100),backgroundColor:"#6ea8ff",borderRadius:5}]},options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{boxWidth:10}}},scales:{x:{ticks:{callback:v=>Number(v).toFixed(2)}}}}});}
+renderShell();makeCharts();setTimeout(()=>location.reload(),30000);
 </script></body></html>""".replace("__DATA__", _safe_json(s))
 
 
