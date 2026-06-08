@@ -232,79 +232,58 @@ def _e(value):
     return html.escape(str(value))
 
 
-def _cards(s):
-    c = s["cycles"]
-    t = s["trade_stats"]
-    win_rate = (t["wins"] / max(1, t["wins"] + t["losses"])) * 100
-    data = [
-        ("Balance", f"${s['balance_usdt']:.4f}", f"Rp {s['balance_idr']:,.0f}"),
-        ("Growth", f"{s['growth_pct']:.2f}%", "Rp 300,000 -> Rp 10,000,000"),
-        ("Cycle", f"#{s['heartbeat_cycle']}", f"Heartbeat age: {s['heartbeat_age_sec']}s"),
-        ("Last Cycle", f"{c['last_candidates']} / {c['last_executed']}", "Candidates / Executed"),
-        ("Trades", str(t["count"]), f"Win rate {win_rate:.1f}%"),
-        ("Total PnL", f"${t['pnl']:+.4f}", "Closed trade log"),
-        ("Positions", str(s["positions"]), "Open positions"),
-        ("Revision", s["git_rev"], s["updated_utc"]),
-    ]
-    return "".join(
-        f"<div class='card'><div class='label'>{_e(k)}</div><div class='val'>{_e(v)}</div><div class='small'>{_e(sub)}</div></div>"
-        for k, v, sub in data
+def _safe_json(data):
+    return (
+        json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
     )
-
-
-def _scan_table(rows):
-    body = "".join(
-        f"<tr><td>{_e(t)}</td><td>{_e(sym)}</td><td>{_e(sig)}</td><td>{_e(conf)}%</td><td>{_e(reason)}</td></tr>"
-        for t, sym, sig, conf, reason in rows
-    )
-    return body or "<tr><td colspan='5'>No scan rows yet.</td></tr>"
-
-
-def _trade_table(rows):
-    if not rows:
-        return "<tr><td colspan='5'>No trades logged yet.</td></tr>"
-    body = []
-    for row in rows[-12:]:
-        body.append(
-            "<tr>"
-            f"<td>{_e(row.get('Timestamp', row.get('timestamp', '')))}</td>"
-            f"<td>{_e(row.get('Symbol', row.get('symbol', '')))}</td>"
-            f"<td>{_e(row.get('Side', row.get('side', row.get('Result', ''))))}</td>"
-            f"<td>{_e(row.get('PnL', row.get('pnl', '')))}</td>"
-            f"<td>{_e(row.get('Confidence', row.get('confidence', '')))}</td>"
-            "</tr>"
-        )
-    return "".join(body)
 
 
 def render_page():
     s = _snapshot()
-    badge = "ok" if s["health"] == "OK" else "warn" if s["health"] == "MODEL WATCH" else "bad"
-    alerts = "".join(f"<li>{_e(a[-240:])}</li>" for a in s["model_alerts"]) or "<li>No recent model-health alerts.</li>"
-    errors = "".join(f"<li>{_e(a[-240:])}</li>" for a in s["errors"]) or "<li>No recent runtime errors.</li>"
-    procs = "\n".join(s["process"]) or "No engine processes found"
-    return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<meta http-equiv='refresh' content='30'><title>AegisQuant Dashboard</title>
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AegisQuant Live Dashboard</title>
 <style>
-:root{{--bg:#0e1117;--panel:#141824;--line:#2d3548;--text:#ccd6f6;--muted:#8892b0;--teal:#64ffda;--yellow:#ffd740;--red:#ff6b6b}}
-body{{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}}.wrap{{max-width:1240px;margin:0 auto;padding:28px 18px 42px}}
-.top{{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:18px}}h1{{margin:0;color:var(--teal);font-size:34px}}p{{color:var(--muted)}}
-.badge{{border:1px solid var(--line);border-radius:8px;padding:10px 14px;font-weight:800;white-space:nowrap}}.ok{{color:var(--teal)}}.warn{{color:var(--yellow)}}.bad{{color:var(--red)}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}}.card{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}}
-.label{{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}}.val{{margin-top:8px;font-size:22px;font-weight:800}}.small{{font-size:12px;color:var(--muted)}}
-section{{margin-top:16px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}}h2{{margin:0 0 12px;font-size:18px;color:#e6f1ff}}
-table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{border-bottom:1px solid var(--line);padding:9px;text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}
-ul{{margin:0;padding-left:18px;color:var(--muted)}}li{{margin:7px 0}}pre{{white-space:pre-wrap;color:var(--muted);margin:0;font-size:12px}}code{{color:var(--teal)}}
-</style></head><body><main class='wrap'>
-<div class='top'><div><h1>AegisQuant Dashboard</h1><p>Production monitor for cPanel Passenger. Auto-refreshes every 30 seconds.</p></div><div class='badge {badge}'>{_e(s['health'])}</div></div>
-<div class='grid'>{_cards(s)}</div>
-<section><h2>Latest Symbol Scan</h2><table><thead><tr><th>Time</th><th>Symbol</th><th>Signal</th><th>Confidence</th><th>Reason</th></tr></thead><tbody>{_scan_table(s['scan_rows'])}</tbody></table></section>
-<section><h2>Trade History</h2><table><thead><tr><th>Time</th><th>Symbol</th><th>Side/Result</th><th>PnL</th><th>Confidence</th></tr></thead><tbody>{_trade_table(s['trades'])}</tbody></table></section>
-<section><h2>Model Health</h2><ul>{alerts}</ul></section>
-<section><h2>Runtime Errors</h2><ul>{errors}</ul></section>
-<section><h2>Processes</h2><pre>{_e(procs)}</pre></section>
-<p class='small'>JSON status: <code>/health</code>. Full Streamlit UI still requires a websocket-capable runtime; this WSGI dashboard is the cPanel-safe version.</p>
-</main></body></html>"""
+:root{--bg:#070a12;--panel:#101622;--panel2:#151d2c;--line:#263246;--text:#edf3ff;--muted:#8d9ab5;--teal:#5ef4d3;--blue:#7aa2ff;--green:#44d48c;--red:#ff667d;--yellow:#ffd166}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#142338 0,#070a12 42%,#06080d 100%);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+.wrap{max-width:1360px;margin:0 auto;padding:24px}.hero{display:grid;grid-template-columns:1.35fr .65fr;gap:18px;align-items:stretch}.panel{background:linear-gradient(180deg,rgba(21,29,44,.96),rgba(12,17,27,.96));border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 60px rgba(0,0,0,.24)}
+.title{padding:26px}.eyebrow{color:var(--teal);font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.title h1{margin:10px 0 8px;font-size:42px;line-height:1;letter-spacing:0}.title p{margin:0;color:var(--muted);max-width:780px}.status{padding:22px}.statusTop{display:flex;justify-content:space-between;gap:12px;align-items:center}.badge{border:1px solid var(--line);border-radius:999px;padding:8px 12px;font-size:12px;font-weight:900}.ok{color:var(--teal);background:rgba(94,244,211,.08)}.warn{color:var(--yellow);background:rgba(255,209,102,.08)}.bad{color:var(--red);background:rgba(255,102,125,.08)}
+.ring{width:142px;height:142px;border-radius:50%;margin:20px auto 10px;background:conic-gradient(var(--teal) calc(var(--p)*1%),#223047 0);display:grid;place-items:center}.ring div{width:104px;height:104px;border-radius:50%;background:#0e1420;display:grid;place-items:center;text-align:center}.ring strong{font-size:25px}.ring span{display:block;color:var(--muted);font-size:11px}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.card{padding:15px;background:rgba(16,22,34,.9);border:1px solid var(--line);border-radius:8px}.label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.value{margin-top:8px;font-size:23px;font-weight:900}.sub{color:var(--muted);font-size:12px;margin-top:4px}
+.tabs{position:sticky;top:0;z-index:5;display:flex;gap:8px;flex-wrap:wrap;background:rgba(7,10,18,.9);backdrop-filter:blur(10px);padding:14px 0}.tabBtn{border:1px solid var(--line);background:#0f1624;color:var(--muted);border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}.tabBtn.active{color:#06100d;background:var(--teal);border-color:var(--teal)}
+.tab{display:none}.tab.active{display:block}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.section{padding:17px;margin-bottom:14px}.section h2{margin:0 0 12px;font-size:18px}.rec{display:grid;gap:10px}.recItem{border-left:4px solid var(--blue);background:#0c1320;border-radius:8px;padding:12px}.recItem.critical{border-color:var(--red)}.recItem.warning{border-color:var(--yellow)}.recItem.success{border-color:var(--green)}.recItem strong{display:block}.recItem span{color:var(--muted);font-size:13px}
+canvas{width:100%;height:260px;background:#0b111d;border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}tr:hover td{background:rgba(94,244,211,.04)}.pos{color:var(--green)}.neg{color:var(--red)}pre{white-space:pre-wrap;color:var(--muted);font-size:12px;margin:0}.foot{color:var(--muted);font-size:12px;text-align:center;padding:18px}
+@media(max-width:900px){.hero,.grid2{grid-template-columns:1fr}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.title h1{font-size:34px}}@media(max-width:560px){.wrap{padding:14px}.cards{grid-template-columns:1fr}.tabBtn{flex:1}.title h1{font-size:29px}}
+</style></head><body><main class="wrap">
+<section class="hero"><div class="panel title"><div class="eyebrow">AegisQuant Production</div><h1>Live Trading Command Center</h1><p>Root dashboard for aegisquant.web.id. Lightweight cPanel-safe UI with runtime health, growth target, signal scan, PnL analytics, and my recommendation panel.</p></div>
+<aside class="panel status"><div class="statusTop"><span class="label">System Status</span><span id="healthBadge" class="badge">...</span></div><div id="growthRing" class="ring"><div><strong id="growthPct">0%</strong><span>Growth Target</span></div></div><div class="sub" id="updatedAt"></div></aside></section>
+<section class="cards" id="cards"></section>
+<nav class="tabs"><button class="tabBtn active" data-tab="overview">Overview</button><button class="tabBtn" data-tab="markets">Markets</button><button class="tabBtn" data-tab="performance">Performance</button><button class="tabBtn" data-tab="trades">Trades</button><button class="tabBtn" data-tab="system">System</button></nav>
+<section id="overview" class="tab active"><div class="grid2"><div class="panel section"><h2>My Recommendation</h2><div id="recommendations" class="rec"></div></div><div class="panel section"><h2>Equity Curve</h2><canvas id="equityChart"></canvas></div></div><div class="panel section"><h2>Latest Symbol Scan</h2><div id="scanTable"></div></div></section>
+<section id="markets" class="tab"><div class="grid2"><div class="panel section"><h2>Symbol Performance</h2><canvas id="symbolChart"></canvas></div><div class="panel section"><h2>Symbol Stats</h2><div id="symbolTable"></div></div></div></section>
+<section id="performance" class="tab"><div class="grid2"><div class="panel section"><h2>Daily PnL</h2><canvas id="dailyChart"></canvas></div><div class="panel section"><h2>Risk Notes</h2><div id="riskNotes" class="rec"></div></div></div></section>
+<section id="trades" class="tab"><div class="panel section"><h2>Trade History</h2><div id="tradeTable"></div></div></section>
+<section id="system" class="tab"><div class="grid2"><div class="panel section"><h2>Runtime Errors</h2><div id="errors"></div></div><div class="panel section"><h2>Processes</h2><pre id="processes"></pre></div></div><div class="panel section"><h2>Model Health</h2><div id="modelAlerts"></div></div></section>
+<div class="foot">Auto refresh every 30 seconds. Protected JSON remains available at /api/dashboard for Vercel or private clients.</div>
+</main><script id="aegis-data" type="application/json">__DATA__</script><script>
+const s=JSON.parse(document.getElementById("aegis-data").textContent);const $=id=>document.getElementById(id);const money=n=>"$"+Number(n||0).toFixed(4);const idr=n=>"Rp "+Number(n||0).toLocaleString("id-ID",{maximumFractionDigits:0});const pct=n=>Number(n||0).toFixed(2)+"%";
+function cls(v){return Number(v||0)>=0?"pos":"neg"}function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
+function table(headers,rows,empty){if(!rows.length)return "<div class='sub'>"+empty+"</div>";return "<table><thead><tr>"+headers.map(h=>"<th>"+h+"</th>").join("")+"</tr></thead><tbody>"+rows.join("")+"</tbody></table>"}
+function card(k,v,sub){return `<div class="card"><div class="label">${k}</div><div class="value">${v}</div><div class="sub">${sub}</div></div>`}
+function drawLine(id,pts,color="#5ef4d3"){const c=$(id),x=c.getContext("2d"),w=c.width=c.offsetWidth*2,h=c.height=260*2;x.clearRect(0,0,w,h);x.strokeStyle="#263246";x.lineWidth=2;for(let i=1;i<5;i++){x.beginPath();x.moveTo(0,h*i/5);x.lineTo(w,h*i/5);x.stroke()}if(!pts.length)return;const vals=pts.map(Number),mn=Math.min(...vals,0),mx=Math.max(...vals,0),span=mx-mn||1;x.beginPath();vals.forEach((v,i)=>{const px=i/(vals.length-1||1)*w,py=h-((v-mn)/span*h*.82+h*.09);i?x.lineTo(px,py):x.moveTo(px,py)});x.strokeStyle=color;x.lineWidth=5;x.stroke()}
+function drawBars(id,rows,key="pnl"){const c=$(id),x=c.getContext("2d"),w=c.width=c.offsetWidth*2,h=c.height=260*2;x.clearRect(0,0,w,h);if(!rows.length)return;const vals=rows.map(r=>Number(r[key]||0)),mx=Math.max(...vals.map(Math.abs),.01),bw=w/vals.length*.72;rows.forEach((r,i)=>{const v=Number(r[key]||0),bh=Math.abs(v)/mx*h*.42,base=h*.52;x.fillStyle=v>=0?"#44d48c":"#ff667d";x.fillRect(i*w/vals.length+(w/vals.length-bw)/2,v>=0?base-bh:base,bw,bh)})}
+function render(){const t=s.trade_stats||{},c=s.cycles||{},wr=t.wins/Math.max(1,(t.wins||0)+(t.losses||0))*100,b=s.health==="OK"?"ok":s.health==="MODEL WATCH"?"warn":"bad";$("healthBadge").className="badge "+b;$("healthBadge").textContent=s.health;$("growthRing").style.setProperty("--p",Math.max(0,Math.min(100,s.growth_pct||0)));$("growthPct").textContent=pct(s.growth_pct);$("updatedAt").textContent="Updated "+s.updated_utc;
+$("cards").innerHTML=[card("Balance",money(s.balance_usdt),idr(s.balance_idr)),card("Growth",pct(s.growth_pct),"Rp 300rb to Rp 10jt"),card("Cycle","#"+(s.heartbeat_cycle??"-"),"Heartbeat "+(s.heartbeat_age_sec??"-")+"s"),card("Last Scan",(c.last_candidates||0)+" / "+(c.last_executed||0),"Candidates / executed"),card("Trades",t.count||0,"Win rate "+wr.toFixed(1)+"%"),card("Closed PnL",`<span class="${cls(t.pnl)}">${money(t.pnl)}</span>`,"From trade log"),card("Positions",s.positions||0,"Open exposure"),card("Revision",s.git_rev||"unknown",s.engine_ok&&s.watchdog_ok?"Runtime online":"Check runtime")].join("");
+$("recommendations").innerHTML=(s.recommendations||[]).map(r=>`<div class="recItem ${esc(r.level)}"><strong>${esc(r.title)}</strong><span>${esc(r.detail)}</span></div>`).join("");
+$("riskNotes").innerHTML=[["warning","Micro sizing","Below 25 USDT, exchange minimum notional and fees can dominate edge."],["success","Best setup bias","Keep capital rotation conservative: only rotate for a clearly stronger edge."],["warning","Security","Rotate API/cPanel keys after deployment hardening because credentials were shared during setup."]].map(r=>`<div class="recItem ${r[0]}"><strong>${r[1]}</strong><span>${r[2]}</span></div>`).join("");
+$("scanTable").innerHTML=table(["Time","Symbol","Signal","Confidence","Reason"],(s.scan_rows||[]).slice().reverse().map(r=>`<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td><td>${esc(r[3])}%</td><td>${esc(r[4])}</td></tr>`),"No scan rows yet.");
+$("tradeTable").innerHTML=table(["Time","Symbol","Side/Result","PnL","Confidence"],(s.trades||[]).slice(-60).reverse().map(r=>{const p=Number(r.PnL||r.pnl||0);return `<tr><td>${esc(r.Timestamp||r.timestamp||"")}</td><td>${esc(r.Symbol||r.symbol||"")}</td><td>${esc(r.Side||r.side||r.Result||"")}</td><td class="${cls(p)}">${p.toFixed(6)}</td><td>${esc(r.Confidence||r.confidence||"")}</td></tr>`}),"No trades logged yet.");
+$("symbolTable").innerHTML=table(["Symbol","Trades","Win Rate","PnL"],(s.symbol_stats||[]).map(r=>`<tr><td>${esc(r.symbol)}</td><td>${r.trades}</td><td>${pct(r.win_rate)}</td><td class="${cls(r.pnl)}">${money(r.pnl)}</td></tr>`),"No symbol stats yet.");
+$("errors").innerHTML=(s.errors||[]).length?table(["Recent Error"],s.errors.map(e=>`<tr><td>${esc(String(e).slice(-280))}</td></tr>`),""):"<div class='sub'>No recent runtime errors.</div>";$("modelAlerts").innerHTML=(s.model_alerts||[]).length?table(["Model Alert"],s.model_alerts.map(e=>`<tr><td>${esc(String(e).slice(-280))}</td></tr>`),""):"<div class='sub'>No recent model-health alerts.</div>";$("processes").textContent=(s.process||[]).join("\\n")||"No engine processes found";
+drawLine("equityChart",(s.equity_curve||[]).map(r=>r.pnl));drawBars("dailyChart",(s.daily_pnl||[]).slice(-45));drawBars("symbolChart",(s.symbol_stats||[]).slice(0,10));}
+document.querySelectorAll(".tabBtn").forEach(btn=>btn.onclick=()=>{document.querySelectorAll(".tabBtn,.tab").forEach(e=>e.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");setTimeout(render,40)});render();setTimeout(()=>location.reload(),30000);
+</script></body></html>""".replace("__DATA__", _safe_json(s))
 
 
 def application(environ, start_response):
