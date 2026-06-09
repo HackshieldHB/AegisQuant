@@ -412,6 +412,8 @@ SIGNAL_GATES = {
     # Multi-timeframe consensus
     "MTF_CONSENSUS_REQUIRED": True,         # 1H direction must agree with entry signal
     "MTF_CONSENSUS_OVERRIDE_CONF": 0.78,    # AI confidence that bypasses MTF check (lowered from 0.82)
+    "MIN_DIRECTIONAL_MASS": 0.50,
+    "AI_ONLY_DIRECTIONAL_CONF": 0.74,
 }
 
 # ==================================================

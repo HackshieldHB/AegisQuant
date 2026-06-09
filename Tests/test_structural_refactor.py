@@ -121,6 +121,28 @@ class TestEffectiveRR(unittest.TestCase):
         self.assertGreaterEqual(rr, 1.8)
 
 
+class TestDirectionalConfidence(unittest.TestCase):
+    """Tests for three-class directional probability normalization."""
+
+    def setUp(self):
+        from Core.AsyncEngine import calculate_directional_confidence
+        self.calculate = calculate_directional_confidence
+
+    def test_excludes_neutral_mass_from_directional_conviction(self):
+        confidence, mass = self.calculate(0.55, 0.15)
+        self.assertAlmostEqual(mass, 0.70)
+        self.assertAlmostEqual(confidence, 0.55 / 0.70)
+
+    def test_balanced_direction_remains_low_confidence(self):
+        confidence, mass = self.calculate(0.30, 0.30)
+        self.assertAlmostEqual(mass, 0.60)
+        self.assertAlmostEqual(confidence, 0.50)
+
+    def test_zero_directional_mass_is_safe(self):
+        confidence, mass = self.calculate(0.0, 0.0)
+        self.assertEqual((confidence, mass), (0.0, 0.0))
+
+
 class TestCooldownFix(unittest.TestCase):
     """Tests for Risk_Manager cooldown reset logic."""
 

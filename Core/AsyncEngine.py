@@ -111,6 +111,15 @@ def calculate_effective_rr(sl_pct: float, tp_pct: float, fee_pct: float, spread_
     return effective_tp / effective_sl
 
 
+def calculate_directional_confidence(p_long: float, p_short: float) -> Tuple[float, float]:
+    """Return conviction within directional mass and the total directional mass."""
+    directional_mass = max(0.0, min(1.0, float(p_long) + float(p_short)))
+    if directional_mass <= 0.0:
+        return 0.0, 0.0
+    confidence = max(float(p_long), float(p_short)) / directional_mass
+    return max(0.0, min(1.0, confidence)), directional_mass
+
+
 def _compute_volume_poc(candles: list, price_levels: int = 50) -> float:
     """Point of Control: price level with highest volume over candle set."""
     try:
@@ -889,13 +898,18 @@ class AsyncEngine:
             trace["p_short"] = p_short
 
             ai_signal     = "BUY" if p_long > p_short else "SELL"
-            ai_confidence = p_long if ai_signal == "BUY" else p_short
+            raw_ai_confidence = p_long if ai_signal == "BUY" else p_short
+            ai_confidence, directional_mass = calculate_directional_confidence(p_long, p_short)
+            trace["raw_ai_confidence"] = raw_ai_confidence
+            trace["directional_mass"] = directional_mass
 
             # ── Neutral gate: model is undecided — treat as HOLD ─────────
             # For 3-class {-1,0,1} models the bulk of probability mass can
             # sit in the neutral class.  If long + short together is < 50%
             # the model has no real conviction in either direction.
-            if (p_long + p_short) < 0.50:
+            gates_cfg = CONFIG.get("SIGNAL_GATES", {})
+            min_directional_mass = float(gates_cfg.get("MIN_DIRECTIONAL_MASS", 0.50))
+            if directional_mass < min_directional_mass:
                 ai_signal     = "HOLD"
                 ai_confidence = 0.0
 
@@ -911,15 +925,21 @@ class AsyncEngine:
                 trace["blocking_reason"] = f"Signal conflict: TA={base_signal} vs AI={ai_signal}"
                 return trace
 
-            if base_signal == "HOLD" and ai_confidence < 0.78:
+            ai_only_conf = float(gates_cfg.get("AI_ONLY_DIRECTIONAL_CONF", 0.74))
+            hold_reason = "No actionable signal"
+            if base_signal == "HOLD" and ai_confidence < ai_only_conf:
                 signal = "HOLD"
+                support = bull_indicators if ai_signal == "BUY" else bear_indicators
+                hold_reason = (
+                    f"AI-only gate: directional conf {ai_confidence:.0%} < {ai_only_conf:.0%} "
+                    f"(raw={raw_ai_confidence:.0%}, mass={directional_mass:.0%}, support={support}/5)"
+                )
             elif base_signal != "HOLD":
                 signal = base_signal
             else:
                 signal = ai_signal
 
             # ── Multi-Timeframe Consensus (1H direction) ──────────────
-            gates_cfg = CONFIG.get("SIGNAL_GATES", {})
             mtf_required     = gates_cfg.get("MTF_CONSENSUS_REQUIRED", True)
             mtf_override_conf = gates_cfg.get("MTF_CONSENSUS_OVERRIDE_CONF", 0.82)
             if mtf_required and signal != "HOLD" and htf_direction != "NEUTRAL":
@@ -955,7 +975,7 @@ class AsyncEngine:
 
             if signal == "HOLD":
                 trace["terminal_state"] = "HOLD"
-                trace["blocking_reason"] = "No actionable signal"
+                trace["blocking_reason"] = hold_reason
                 return trace
 
             # ── Volume + momentum scores ──────────────────────────────
@@ -1253,10 +1273,10 @@ class AsyncEngine:
                 bull_ind = trace.get("bull_indicators", 0)
                 bear_ind = trace.get("bear_indicators", 0)
                 # base_conf_thr already incorporates per-symbol override + dynamic streak boost
-                if ai_confidence < base_conf_thr and bull_ind < 2:
+                if ai_confidence < base_conf_thr and indicator_count < 2:
                     execution_allowed, blocking_reason = (
                         False,
-                        f"Signal quality floor missed (Conf={ai_confidence:.0%} < {base_conf_thr:.0%}, Bull={bull_ind}/5)",
+                        f"Signal quality floor missed (Conf={ai_confidence:.0%} < {base_conf_thr:.0%}, Indicators={indicator_count}/5)",
                     )
                 elif ai_confidence >= base_conf_thr + 0.05:
                     pass   # strong signal — skip regime check
@@ -2520,7 +2540,7 @@ class AsyncEngine:
             reason = t.get("blocking_reason", "")
             self.logger.info(
                 "[SCAN] %-12s | %-9s | conf=%.0f%% | %s",
-                sym, state, conf * 100, reason[:60] if reason else "—",
+                sym, state, conf * 100, reason[:180] if reason else "—",
             )
         # Count all configured symbols across every active market (not just CRYPTO)
         total_configured = sum(
