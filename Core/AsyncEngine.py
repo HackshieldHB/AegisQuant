@@ -37,6 +37,7 @@ from Execution.CryptoExecution import CryptoExecution
 from Execution.ForexExecution import ForexExecution
 from Execution.StockExecution import StockExecution
 from Services.TelegramService import TelegramService
+from Services.ShadowEvaluator import ShadowEvaluator
 from Data.ModelLoader import load_all_models
 from AI.Predictor import AIPredictor
 from Strategies.Ensemble import EnsembleStrategy
@@ -206,6 +207,7 @@ class AsyncEngine:
         self.risk_manager    = RiskManager(balance=0.0)
         self.portfolio_manager = PortfolioManager()
         self.reporter        = Reporter()
+        self.shadow_evaluator = ShadowEvaluator()
         self.telegram        = TelegramService()
         self.risk_manager.set_drawdown_breach_callback(self.telegram.notify_drawdown_breach)
 
@@ -238,7 +240,10 @@ class AsyncEngine:
             f"{sec}/{sym}"
             for sec, syms in self.models.items()
             for sym, m in syms.items()
-            if m is None
+            if m is None and (
+                CONFIG["PROJECT"]["MODE"] != "LIVE"
+                or sym.upper() in set(CONFIG["PROJECT"].get("LIVE_SYMBOLS", []))
+            )
         ]
         if _missing_models:
             self.logger.critical(
@@ -357,7 +362,15 @@ class AsyncEngine:
         # Normalise: BTCUSDT → BTC/USDT
         symbol = symbol_raw if "/" in symbol_raw else (symbol_raw[:-4] + "/" + symbol_raw[-4:])
         try:
-            result = self.router.close_position("CRYPTO", symbol)
+            exposure = self.portfolio_manager.get_exposure_for_symbol(symbol)
+            entry_price = self.portfolio_manager.get_entry_price(symbol)
+            if exposure <= 0 or not entry_price:
+                return f"Cannot close `{symbol}`: no tracked Spot position."
+            result = self.router.close_position(
+                "CRYPTO",
+                symbol,
+                qty=exposure / entry_price,
+            )
             if result.get("status") in ["filled", "closed"]:
                 self.portfolio_manager.record_close(symbol, sector="CRYPTO")
                 return f"✅ *Closed position*: `{symbol}` — manually triggered via Telegram."
@@ -721,6 +734,10 @@ class AsyncEngine:
             ts_val = candles[-1].timestamp
             current_ts = float(ts_val.timestamp()) if hasattr(ts_val, "timestamp") else float(ts_val)
             trace["candle_ts"] = current_ts
+            trace["timeframe"] = timeframe
+            trace["price"] = float(candles[-1].close or 0.0)
+            trace["candle_high"] = float(candles[-1].high or trace["price"])
+            trace["candle_low"] = float(candles[-1].low or trace["price"])
             if current_ts <= self._last_traded_candle.get(symbol, 0):
                 return trace
             # Mark candle seen so the same candle is never processed twice within one cycle
@@ -898,6 +915,7 @@ class AsyncEngine:
             trace["p_short"] = p_short
 
             ai_signal     = "BUY" if p_long > p_short else "SELL"
+            trace["ai_signal"] = ai_signal
             raw_ai_confidence = p_long if ai_signal == "BUY" else p_short
             ai_confidence, directional_mass = calculate_directional_confidence(p_long, p_short)
             trace["raw_ai_confidence"] = raw_ai_confidence
@@ -1457,6 +1475,13 @@ class AsyncEngine:
                     return ("BLOCKED", "Existing position conflict", 0.0)
                 if not self.risk_manager.can_open_new_trade(open_count) or open_count >= max_trades:
                     return ("BLOCKED", "Max positions reached", 0.0)
+                if not self.portfolio_manager.can_open_trade(
+                    asset_class,
+                    notional,
+                    total_equity,
+                    positions_count=open_count,
+                ):
+                    return ("BLOCKED", "Portfolio exposure or halt gate rejected trade", 0.0)
 
             import functools
             func   = functools.partial(self.router.open_position, asset_class, symbol, rounded_quantity, signal, sl=sl_price, tp=tp_price)
@@ -1567,6 +1592,9 @@ class AsyncEngine:
 
     async def _reconciliation_loop(self) -> None:
         import random
+        if CONFIG["PROJECT"].get("MODE") != "LIVE":
+            self.logger.info("RECONCILIATION disabled outside LIVE mode")
+            return
         await asyncio.sleep(10)
         self._api_failure_timestamps = []
         while getattr(self, "_running", True):
@@ -1581,17 +1609,7 @@ class AsyncEngine:
                 if not is_spot:
                     positions = await self._tt(crypto_exec.exchange.fetch_positions, timeout=15.0)
                 else:
-                    for sym, ival in list(self.portfolio_manager._exposure_by_symbol.items()):
-                        if ival > 0:
-                            try:
-                                open_orders = await self._safe_fetch_open_orders(crypto_exec.exchange, sym)
-                                if open_orders:
-                                    qty_sum = max([float(o.get("amount") or 0.0) for o in open_orders] + [0.0])
-                                    ticker  = await self._tt(crypto_exec.exchange.fetch_ticker, sym, timeout=10.0)
-                                    price   = float(ticker.get("last", 0.0))
-                                    positions.append({"symbol": sym, "contracts": qty_sum, "markPrice": price})
-                            except Exception as e:
-                                self.logger.error("Spot reconciliation order fetch failed for %s: %s", sym, e)
+                    positions = await self._tt(crypto_exec.get_open_positions, timeout=20.0)
 
                 async with self._capital_lock:
                     active_ext_symbols = []
@@ -1618,7 +1636,14 @@ class AsyncEngine:
                                     self.logger.critical("NAKED EXPOSURE IMPORTED: %s has NO SL! Sweeping.", sym)
                                     self.telegram.send_message(f"NAKED EXPOSURE: {sym}. Initiating sweep...", severity="CRITICAL")
                                     try:
-                                        sweep_res = await self._tt(self.router.close_position, "CRYPTO", sym, timeout=30.0)
+                                        sweep_res = await self._tt(
+                                            self.router.close_position,
+                                            "CRYPTO",
+                                            sym,
+                                            None,
+                                            qty,
+                                            timeout=30.0,
+                                        )
                                         if sweep_res.get("status") == "filled":
                                             self.logger.info("SWEEP SUCCESS: %s liquidated.", sym)
                                         else:
@@ -2056,6 +2081,9 @@ class AsyncEngine:
         State is tracked in self._ptp_state {symbol: "WATCHING"|"TP1_HIT"}.
         """
         ptp_cfg = CONFIG.get("PARTIAL_TP", {})
+        if CONFIG["PROJECT"].get("MODE") != "LIVE":
+            self.logger.info("PARTIAL_TP disabled outside LIVE mode")
+            return
         if not ptp_cfg.get("ENABLED", False):
             self.logger.info("PARTIAL_TP disabled — scale-out loop not started")
             return
@@ -2145,10 +2173,11 @@ class AsyncEngine:
 
                         # Update internal exposure (use actual sell_price, not entry_price)
                         async with self._capital_lock:
-                            sold_notional = qty_close * sell_price
-                            remaining_val = max(0.0, exposure_val - sold_notional)
+                            remaining_val = max(0.0, exposure_val * (1.0 - scale))
                             if remaining_val > 0:
-                                self.portfolio_manager._exposure_by_symbol[sym] = remaining_val
+                                self.portfolio_manager.record_resize(
+                                    "CRYPTO", sym, remaining_val
+                                )
                             else:
                                 self.portfolio_manager.record_close(sym, sector="CRYPTO")
                                 self._ptp_state.pop(sym, None)
@@ -2238,6 +2267,9 @@ class AsyncEngine:
 
     async def _trailing_stop_loop(self) -> None:
         stops_cfg = CONFIG.get("STOPS", {})
+        if CONFIG["PROJECT"].get("MODE") != "LIVE":
+            self.logger.info("TRAILING_STOP disabled outside LIVE mode")
+            return
         if not stops_cfg.get("TRAILING_STOP", False):
             self.logger.info("TRAILING_STOP disabled — trailing loop not started")
             return
@@ -2358,15 +2390,28 @@ class AsyncEngine:
             pass
 
         tasks = []
+        live_symbols = set(CONFIG["PROJECT"].get("LIVE_SYMBOLS", []))
         for asset_class, symbols in CONFIG["SYMBOLS"].items():
             if asset_class not in self._markets:
                 continue
             for symbol, timeframes in symbols.items():
+                if (
+                    CONFIG["PROJECT"]["MODE"] == "LIVE"
+                    and asset_class == "CRYPTO"
+                    and live_symbols
+                    and symbol.upper() not in live_symbols
+                ):
+                    continue
                 tf = timeframes[-1] if timeframes else "5m"
                 tasks.append(self._process_symbol(asset_class, symbol, tf, cycle_trace_id))
 
         results    = await asyncio.gather(*tasks, return_exceptions=True)
         all_traces = [r for r in results if isinstance(r, dict)]
+
+        try:
+            self.shadow_evaluator.process_cycle(all_traces)
+        except Exception as shadow_error:
+            self.logger.error("SHADOW_EVALUATION_FAILED: %s", shadow_error)
 
         valid_trades = [t for t in all_traces if t.get("is_valid_candidate")]
         valid_trades.sort(key=lambda x: x["edge_score"], reverse=True)
@@ -2543,10 +2588,7 @@ class AsyncEngine:
                 sym, state, conf * 100, reason[:180] if reason else "—",
             )
         # Count all configured symbols across every active market (not just CRYPTO)
-        total_configured = sum(
-            len(syms) for ac, syms in CONFIG["SYMBOLS"].items()
-            if ac in self._markets
-        )
+        total_configured = len(tasks)
         self.logger.info(
             "[SCAN] Done — %d/%d symbols processed | candidates=%d executed=%d",
             len(all_traces), total_configured,
@@ -2670,6 +2712,9 @@ class AsyncEngine:
         Prevents capital from being tied up in drifting, directionless trades.
         """
         te_cfg = CONFIG.get("TIME_EXIT", {})
+        if CONFIG["PROJECT"].get("MODE") != "LIVE":
+            self.logger.info("TIME_EXIT disabled outside LIVE mode")
+            return
         if not te_cfg.get("ENABLED", True):
             self.logger.info("TIME_EXIT disabled — stale-position loop not started")
             return

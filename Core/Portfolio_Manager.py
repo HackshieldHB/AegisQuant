@@ -111,6 +111,21 @@ class PortfolioManager:
             elif val and not sector:
                 self._recompute_sector_totals()
 
+    def record_resize(self, sector: str, symbol: str, new_value: float) -> None:
+        """Atomically resize a position and keep sector totals consistent."""
+        with self._lock:
+            old_value = self._exposure_by_symbol.get(symbol, 0.0)
+            new_value = max(0.0, float(new_value))
+            if new_value == 0.0:
+                self._exposure_by_symbol.pop(symbol, None)
+                self._entry_prices.pop(symbol, None)
+            else:
+                self._exposure_by_symbol[symbol] = new_value
+            self._exposure_by_sector[sector] = max(
+                0.0,
+                self._exposure_by_sector.get(sector, 0.0) + new_value - old_value,
+            )
+
     def _recompute_sector_totals(self) -> None:
         for sector in self._exposure_by_sector:
             self._exposure_by_sector[sector] = 0.0

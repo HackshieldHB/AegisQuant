@@ -62,6 +62,45 @@ from sklearn.calibration import CalibratedClassifierCV
 MODEL_DIR = CONFIG["AI"]["MODEL_PATH"]
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+
+def _calibration_method(y_train: pd.Series) -> str:
+    configured = CONFIG.get("MODEL_ADMISSION", {}).get("CALIBRATION_METHOD", "auto")
+    if configured in {"sigmoid", "isotonic"}:
+        return configured
+    min_class = int(y_train.value_counts().min()) if len(y_train) else 0
+    return "isotonic" if len(y_train) >= 3000 and min_class >= 100 else "sigmoid"
+
+
+def _calibration_metrics(model, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
+    probabilities = model.predict_proba(X_test)
+    classes = list(model.classes_)
+    class_to_index = {value: index for index, value in enumerate(classes)}
+    one_hot = np.zeros_like(probabilities, dtype=float)
+    for row_index, label in enumerate(y_test):
+        if label in class_to_index:
+            one_hot[row_index, class_to_index[label]] = 1.0
+    multiclass_brier = float(np.mean(np.sum((probabilities - one_hot) ** 2, axis=1)))
+    confidence = probabilities.max(axis=1)
+    predicted = np.asarray(classes)[probabilities.argmax(axis=1)]
+    correctness = (predicted == np.asarray(y_test)).astype(float)
+    bins = np.linspace(0.0, 1.0, 11)
+    ece = 0.0
+    for lower, upper in zip(bins[:-1], bins[1:]):
+        mask = (confidence >= lower) & (
+            confidence <= upper if upper == 1.0 else confidence < upper
+        )
+        if mask.any():
+            ece += float(mask.mean()) * abs(
+                float(correctness[mask].mean()) - float(confidence[mask].mean())
+            )
+    return {
+        "method": _calibration_method(y_test),
+        "multiclass_brier": multiclass_brier,
+        "expected_calibration_error": float(ece),
+        "mean_confidence": float(confidence.mean()),
+        "max_confidence": float(confidence.max()),
+    }
+
 # --- CRYPTO (Binance REST API — paginated for 12 months of history) ---
 def fetch_crypto(symbol, interval="15m", months=12):
     """
@@ -342,9 +381,18 @@ def train_random_forest(sector, symbol, df):
     )
     _global_min_class = int(y_train.value_counts().min())
     _global_cv = max(2, min(5, _global_min_class))
-    calibrated_global = CalibratedClassifierCV(global_model, method='sigmoid', cv=_global_cv)
+    global_calibration_method = _calibration_method(y_train)
+    calibrated_global = CalibratedClassifierCV(
+        global_model, method=global_calibration_method, cv=_global_cv
+    )
     calibrated_global.fit(X_train.drop(columns=['regime']), y_train)
     global_acc = calibrated_global.score(X_test.drop(columns=['regime']), y_test)
+    calibration_metrics = _calibration_metrics(
+        calibrated_global,
+        X_test.drop(columns=["regime"]),
+        y_test,
+    )
+    calibration_metrics["method"] = global_calibration_method
 
     # Generate OOS predictions for the global model as a potential fallback
     global_oos_proba, global_oos_signal = cross_val_predict_purged(
@@ -381,7 +429,9 @@ def train_random_forest(sector, symbol, df):
             _xgb_map = {-1: 0, 0: 1, 1: 2}
             y_train_xgb = y_train.map(_xgb_map)
             y_test_xgb  = y_test.map(_xgb_map)
-            calibrated_xgb = CalibratedClassifierCV(xgb_model, method="sigmoid", cv=_global_cv)
+            calibrated_xgb = CalibratedClassifierCV(
+                xgb_model, method=_calibration_method(y_train), cv=_global_cv
+            )
             calibrated_xgb.fit(X_train.drop(columns=["regime"]), y_train_xgb)
             xgb_acc = calibrated_xgb.score(X_test.drop(columns=["regime"]), y_test_xgb)
             # Restore original class labels so Predictor.py can look up P_long/P_short by class value
@@ -406,7 +456,9 @@ def train_random_forest(sector, symbol, df):
                 random_state=42,
                 verbosity=-1,
             )
-            calibrated_lgb = CalibratedClassifierCV(lgb_model, method="sigmoid", cv=5)
+            calibrated_lgb = CalibratedClassifierCV(
+                lgb_model, method=_calibration_method(y_train), cv=5
+            )
             calibrated_lgb.fit(X_train.drop(columns=["regime"]), y_train)
             lgb_acc = calibrated_lgb.score(X_test.drop(columns=["regime"]), y_test)
             dump(calibrated_lgb, os.path.join(MODEL_DIR, f"{base_name}_LGB.joblib"))
@@ -473,7 +525,9 @@ def train_random_forest(sector, symbol, df):
         # Reduce CV folds when any class has fewer than 5 samples to avoid CV error
         _spec_min_class = int(y_train_r.value_counts().min())
         _spec_cv = max(2, min(5, _spec_min_class))
-        calibrated_specialist = CalibratedClassifierCV(specialist, method='sigmoid', cv=_spec_cv)
+        calibrated_specialist = CalibratedClassifierCV(
+            specialist, method=_calibration_method(y_train_r), cv=_spec_cv
+        )
         calibrated_specialist.fit(X_train_r, y_train_r)
 
         # OOS Predictions exclusively for this Regime Segment
@@ -511,7 +565,9 @@ def train_random_forest(sector, symbol, df):
     )
     
     meta_model = RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42, class_weight='balanced', n_jobs=-1)
-    calibrated_meta = CalibratedClassifierCV(meta_model, method='sigmoid', cv=3)
+    calibrated_meta = CalibratedClassifierCV(
+        meta_model, method=_calibration_method(meta_y_train), cv=3
+    )
     calibrated_meta.fit(meta_X_train, meta_y_train)
     
     # 7. Evaluate Meta-Model Improvement on Test Holdout
@@ -564,7 +620,9 @@ def train_random_forest(sector, symbol, df):
                 n_estimators=100, max_depth=8, class_weight="balanced",
                 n_jobs=-1, random_state=42,
             )
-            wf_cal = CalibratedClassifierCV(wf_rf, method="sigmoid", cv=3)
+            wf_cal = CalibratedClassifierCV(
+                wf_rf, method=_calibration_method(y_wf_tr), cv=3
+            )
             wf_cal.fit(X_wf_tr, y_wf_tr)
             wf_acc = wf_cal.score(X_wf_te, y_wf_te)
             wf_accs.append(wf_acc)
@@ -622,6 +680,7 @@ def train_random_forest(sector, symbol, df):
             "std_accuracy":  float(wf_std)  if wf_accs else None,
             "consistent": wf_consistent,
         },
+        "calibration": calibration_metrics,
         "feature_importances": pruning_report[:20] if pruning_report else [],
         "low_importance_features": [r["feature"] for r in pruning_report if r["importance"] < 0.005],
     }

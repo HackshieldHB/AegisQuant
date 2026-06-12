@@ -23,7 +23,9 @@ RUN useradd -m -u 1000 aegis && chown -R aegis:aegis /app
 USER aegis
 
 ENV PYTHONUNBUFFERED=1
-ENV AEGIS_ENVIRONMENT=VPS
+ENV AEGIS_MODE=PAPER
+ENV AEGIS_ENVIRONMENT=LOCAL
+ENV BINANCE_TESTNET=True
 
 # Default: run async engine (recommended for production)
-CMD ["python", "Main_Async.py"]
+CMD ["python", "Main.py"]

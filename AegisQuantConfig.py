@@ -21,8 +21,9 @@ load_dotenv()
 PROJECT = {
     "NAME": "AegisQuant",
     "VERSION": "3.1.0",
-    "MODE": os.getenv("AEGIS_MODE", "LIVE").upper(),  # LIVE | PAPER | BACKTEST - Changed to LIVE for immediate trading
-    "ENVIRONMENT": os.getenv("AEGIS_ENVIRONMENT", "VPS").upper(),  # LOCAL | VPS - Changed to VPS to enable LIVE mode
+    "MODE": os.getenv("AEGIS_MODE", "PAPER").upper(),  # LIVE | PAPER | BACKTEST
+    "ENVIRONMENT": os.getenv("AEGIS_ENVIRONMENT", "LOCAL").upper(),  # LOCAL | VPS
+    "LIVE_TRADING_CONFIRM": os.getenv("LIVE_TRADING_CONFIRM", ""),
     "TIMEZONE": "UTC",
     "CRYPTO_ENABLED": str(os.getenv("CRYPTO_ENABLED", "True")).lower() == "true",
     "FOREX_ENABLED": str(os.getenv("FOREX_ENABLED", "False")).lower() == "true",  # Disabled: no models trained yet
@@ -30,6 +31,14 @@ PROJECT = {
     "DEBUG_MODE": str(os.getenv("DEBUG_MODE", "False")).lower() == "true",
     "AGGRESSIVE_SAFE_MODE": str(os.getenv("AGGRESSIVE_SAFE_MODE", "True")).lower() == "true",
     "ACCOUNT_MODE": os.getenv("ACCOUNT_MODE", "SPOT").upper(),  # SPOT | FUTURES
+    "LIVE_SYMBOLS": [
+        symbol.strip().upper()
+        for symbol in os.getenv(
+            "LIVE_SYMBOLS",
+            "BTC/USDT,ETH/USDT,XRP/USDT,PEPE/USDT",
+        ).split(",")
+        if symbol.strip()
+    ],
 }
 
 # ==================================================
@@ -319,7 +328,7 @@ REPORTING = {
 # TELEGRAM
 # ==================================================
 TELEGRAM = {
-    "ENABLED": str(os.getenv("TELEGRAM_ENABLED", "True")).lower() == "true",
+    "ENABLED": str(os.getenv("TELEGRAM_ENABLED", "False")).lower() == "true",
     "TOKEN": os.getenv("TELEGRAM_BOT_TOKEN"),
     "CHAT_ID": os.getenv("TELEGRAM_CHAT_ID"),
     "PROBABILITY_ALERT_INTERVAL_SEC": 600,
@@ -332,7 +341,7 @@ BROKERS = {
     "BINANCE": {
         "API_KEY": os.getenv("BINANCE_API_KEY"),
         "SECRET": os.getenv("BINANCE_SECRET_KEY"),
-        "TESTNET": str(os.getenv("BINANCE_TESTNET", "False")).lower() == "true",  # default LIVE; set BINANCE_TESTNET=True in .env for testnet
+        "TESTNET": str(os.getenv("BINANCE_TESTNET", "True")).lower() == "true",
     },
     "OANDA": {
         "API_KEY": os.getenv("OANDA_API_KEY"),
@@ -386,6 +395,17 @@ ENSEMBLE = {
     "RF_WEIGHT":  0.40,    # Random Forest
     "XGB_WEIGHT": 0.35,    # XGBoost
     "LGB_WEIGHT": 0.25,    # LightGBM
+}
+
+# ==================================================
+# MODEL ADMISSION - reject weak artifacts before inference
+# ==================================================
+MODEL_ADMISSION = {
+    "ENABLED": str(os.getenv("MODEL_ADMISSION_ENABLED", "True")).lower() == "true",
+    "MIN_TEST_ACCURACY": float(os.getenv("MODEL_MIN_TEST_ACCURACY", "0.51")),
+    "MIN_WALK_FORWARD_ACCURACY": float(os.getenv("MODEL_MIN_WF_ACCURACY", "0.51")),
+    "MIN_TRAIN_SAMPLES": int(os.getenv("MODEL_MIN_TRAIN_SAMPLES", "1000")),
+    "CALIBRATION_METHOD": os.getenv("MODEL_CALIBRATION_METHOD", "auto").lower(),
 }
 
 # ==================================================
@@ -553,6 +573,30 @@ AUTO_RETRAIN = {
 }
 
 # ==================================================
+# SHADOW EVALUATION - observes rejected signals only
+# ==================================================
+SHADOW_EVALUATION = {
+    "ENABLED": str(os.getenv("SHADOW_EVALUATION_ENABLED", "True")).lower() == "true",
+    "SYMBOLS": [
+        symbol.strip().upper()
+        for symbol in os.getenv(
+            "SHADOW_EVALUATION_SYMBOLS",
+            "BTC/USDT,ETH/USDT,XRP/USDT,PEPE/USDT",
+        ).split(",")
+        if symbol.strip()
+    ],
+    "MIN_CONFIDENCE": float(os.getenv("SHADOW_MIN_CONFIDENCE", "0.55")),
+    "MAX_CONFIDENCE": float(os.getenv("SHADOW_MAX_CONFIDENCE", "0.74")),
+    "THRESHOLD_STEP": float(os.getenv("SHADOW_THRESHOLD_STEP", "0.01")),
+    "HORIZON_BARS": int(os.getenv("SHADOW_HORIZON_BARS", "12")),
+    "ROUND_TRIP_FEE_BPS": float(os.getenv("SHADOW_FEE_BPS", "20.0")),
+    "ROUND_TRIP_SLIPPAGE_BPS": float(os.getenv("SHADOW_SLIPPAGE_BPS", "10.0")),
+    "DEFAULT_SPREAD_BPS": float(os.getenv("SHADOW_SPREAD_BPS", "2.0")),
+    "MIN_DIRECTIONAL_MASS": float(os.getenv("SHADOW_MIN_DIRECTIONAL_MASS", "0.50")),
+    "MIN_RECOMMENDATION_SAMPLES": int(os.getenv("SHADOW_MIN_SAMPLES", "100")),
+}
+
+# ==================================================
 # MODEL HEALTH - live anomaly detection thresholds
 # ==================================================
 MODEL_HEALTH = {
@@ -579,9 +623,11 @@ CONFIG = {
     "GROWTH_TARGET": GROWTH_TARGET,
     "TRADING_SESSIONS": TRADING_SESSIONS,
     "ENSEMBLE": ENSEMBLE,
+    "MODEL_ADMISSION": MODEL_ADMISSION,
     "SIGNAL_GATES": SIGNAL_GATES,
     "TIME_EXIT":     TIME_EXIT,
     "PAPER_TRADING": PAPER_TRADING,
+    "SHADOW_EVALUATION": SHADOW_EVALUATION,
     "BENCHMARK": BENCHMARK,
     "RANKING": RANKING,
     "SYMBOL_OVERRIDES": SYMBOL_OVERRIDES,
@@ -602,6 +648,11 @@ CONFIG = {
     "AUTO_RETRAIN":   AUTO_RETRAIN,
     "MODEL_HEALTH":   MODEL_HEALTH,
 }
+
+def is_live_trading_enabled() -> bool:
+    """Return True only for the explicitly selected LIVE execution mode."""
+    return CONFIG["PROJECT"].get("MODE") == "LIVE"
+
 
 # ==================================================
 # HARD-BLOCK: execution on disabled asset class
@@ -637,10 +688,13 @@ def validate_config() -> None:
     if p["ENVIRONMENT"] not in ("LOCAL", "VPS"):
         raise ValueError(f"ENVIRONMENT must be LOCAL or VPS; got {p['ENVIRONMENT']}.")
     
-    if p["MODE"] == "LIVE" and p["ENVIRONMENT"] == "LOCAL":
-        # WARNING: User explicitly enabled LIVE trading on LOCAL machine
-        # This is risky but allowed if user has explicitly confirmed
-        pass  # Allow override - user assumes responsibility
+    if p["MODE"] == "LIVE":
+        if p.get("LIVE_TRADING_CONFIRM") != "I_UNDERSTAND_LIVE_TRADING":
+            raise ValueError(
+                "LIVE mode requires LIVE_TRADING_CONFIRM=I_UNDERSTAND_LIVE_TRADING."
+            )
+        if p["CRYPTO_ENABLED"] and CONFIG["BROKERS"]["BINANCE"].get("TESTNET"):
+            raise ValueError("LIVE mode cannot run with BINANCE_TESTNET=True.")
     
     # ===== SYMBOLS VALIDATION =====
     symbols = CONFIG.get("SYMBOLS", {})
@@ -675,7 +729,7 @@ def validate_config() -> None:
     # ===== BROKER CREDENTIALS VALIDATION =====
     brokers = CONFIG.get("BROKERS", {})
     
-    if p["CRYPTO_ENABLED"]:
+    if p["CRYPTO_ENABLED"] and p["MODE"] == "LIVE":
         binance = brokers.get("BINANCE", {})
         if not binance.get("API_KEY") or not binance.get("SECRET"):
             raise ValueError("CRYPTO_ENABLED but BINANCE API_KEY or SECRET not configured. Set BINANCE_API_KEY and BINANCE_SECRET_KEY in .env")
@@ -712,6 +766,16 @@ def validate_config() -> None:
         raise ValueError("FILL_POLL_INTERVAL_SEC must be a positive integer.")
     if not isinstance(execution.get("RETRY_ATTEMPTS"), int) or execution.get("RETRY_ATTEMPTS", 0) < 1:
         raise ValueError("RETRY_ATTEMPTS must be an integer >= 1.")
+
+    for key in ("MAX_RISK_PER_TRADE", "MAX_PORTFOLIO_EXPOSURE",
+                "MAX_DAILY_DRAWDOWN", "MAX_WEEKLY_DRAWDOWN"):
+        value = risk.get(key)
+        if not 0 < value <= 1:
+            raise ValueError(f"{key} must be within (0, 1].")
+
+    scale_out = CONFIG.get("PARTIAL_TP", {}).get("SCALE_OUT_PCT", 0.5)
+    if not 0 < scale_out < 1:
+        raise ValueError("PARTIAL_TP.SCALE_OUT_PCT must be within (0, 1).")
 
 
 def validate_config_log_level() -> None:
