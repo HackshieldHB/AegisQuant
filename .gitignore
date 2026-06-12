@@ -10,6 +10,11 @@ __pycache__/
 .venv/
 venv/
 
+# Node / dashboard build output
+.npm-cache/
+Dashboard/web/node_modules/
+Dashboard/web/.next/
+
 # Runtime state / logs
 logs/
 *.lock

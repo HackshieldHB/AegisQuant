@@ -56,6 +56,24 @@ C_SUBTEXT = (120, 120, 120)  # secondary text
 C_ROW_ALT = (245, 248, 252)  # alternating row bg
 
 
+def _pdf_text(value) -> str:
+    """Return text that built-in Helvetica can encode in fpdf2."""
+    text = str(value)
+    replacements = {
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2192": "->",
+        "\u221e": "inf",
+        "â€“": "-",
+        "â€”": "-",
+        "â†’": "->",
+        "âˆž": "inf",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
 class ReportGenerator:
     """Generates weekly PDF reports from trades.csv."""
 
@@ -152,6 +170,17 @@ class ReportGenerator:
         stats: dict,
     ) -> str:
         pdf = FPDF()
+        _raw_cell = pdf.cell
+
+        def _safe_cell(*args, **kwargs):
+            args = list(args)
+            if len(args) >= 3:
+                args[2] = _pdf_text(args[2])
+            if "text" in kwargs:
+                kwargs["text"] = _pdf_text(kwargs["text"])
+            return _raw_cell(*args, **kwargs)
+
+        pdf.cell = _safe_cell
         pdf.set_margins(left=14, top=12, right=14)
         pdf.add_page()
 

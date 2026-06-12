@@ -15,7 +15,7 @@ from typing import Dict, Optional, Any
 
 import ccxt
 from Execution.BaseExecution import BaseExecution, execution_result
-from AegisQuantConfig import CONFIG
+from AegisQuantConfig import CONFIG, is_live_trading_enabled
 from Core.Logger import AG_LOGGER
 from Core.BinanceTimeSync import BinanceTimeSync
 
@@ -98,6 +98,10 @@ class CryptoExecution(BaseExecution):
         except Exception as e:
             self.logger.error("CryptoExecution connect failed: %s", e)
             self.exchange = None
+
+    @staticmethod
+    def _is_live_mode() -> bool:
+        return is_live_trading_enabled()
 
     def _cooldown_key(self, symbol: str, side: str) -> str:
         return f"{_normalize_symbol(symbol)}:{side.upper()}"
@@ -341,8 +345,7 @@ class CryptoExecution(BaseExecution):
                     return execution_result("rejected", symbol, side, message=f"Cost {cost:.2f} < min {min_cost} and insufficient balance.")
 
             # Phase 5: Ensure strictly MARKET orders
-            mode = CONFIG["PROJECT"]["MODE"]
-            if mode != "LIVE" and mode != "PAPER":
+            if not self._is_live_mode():
                 self._set_cooldown(symbol, side)
                 self.logger.info("[PAPER] Open %s %s qty=%s cost=%.2f", side, symbol, qty, cost)
                 return execution_result("filled", symbol, side, filled_qty=qty, avg_price=price, order_id="paper_1")
@@ -465,6 +468,9 @@ class CryptoExecution(BaseExecution):
         sl: Optional[float],
         tp: Optional[float],
     ) -> bool:
+        if not self._is_live_mode():
+            self.logger.info("[PAPER] Skipping SL/TP placement for %s", symbol)
+            return True
         try:
             qty = self._amount_to_precision(symbol, qty)
             close_side = "sell" if side.lower() == "buy" else "buy"
@@ -556,6 +562,17 @@ class CryptoExecution(BaseExecution):
         symbol = _normalize_symbol(symbol)
         if not self.exchange:
             return execution_result("rejected", symbol, "SELL", message="Not connected")
+        if not self._is_live_mode():
+            simulated_qty = float(qty or 0.0)
+            self.logger.info("[PAPER] Close %s qty=%s", symbol, simulated_qty)
+            return execution_result(
+                "filled",
+                symbol,
+                "SELL",
+                filled_qty=simulated_qty,
+                avg_price=0.0,
+                order_id="paper_close",
+            )
         try:
             if self.exchange.options.get("defaultType") == "future":
                 positions = self.exchange.fetch_positions([symbol])
@@ -616,7 +633,42 @@ class CryptoExecution(BaseExecution):
             return []
         try:
             if self.exchange.options.get("defaultType") != "future":
-                return []
+                balances = self._with_backoff(
+                    self.exchange.fetch_balance,
+                    {"type": "spot"},
+                )
+                totals = balances.get("total", {})
+                positions = []
+                configured = CONFIG.get("SYMBOLS", {}).get("CRYPTO", {})
+                for symbol in configured:
+                    base_asset = symbol.split("/")[0]
+                    asset_info = balances.get(base_asset, {})
+                    qty = float(
+                        totals.get(base_asset)
+                        or asset_info.get("total")
+                        or 0.0
+                    )
+                    if qty <= 0:
+                        continue
+                    ticker = self._with_backoff(self.exchange.fetch_ticker, symbol)
+                    price = float(ticker.get("last") or ticker.get("close") or 0.0)
+                    if price <= 0:
+                        continue
+                    market = self.exchange.market(symbol)
+                    min_cost = float(
+                        market.get("limits", {}).get("cost", {}).get("min", 5.0) or 5.0
+                    )
+                    if qty * price < min_cost:
+                        continue
+                    positions.append({
+                        "symbol": symbol,
+                        "contracts": qty,
+                        "markPrice": price,
+                        "entryPrice": price,
+                        "side": "long",
+                        "accountType": "spot",
+                    })
+                return positions
             positions = self._with_backoff(self.exchange.fetch_positions)
             return [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
         except Exception as e:
