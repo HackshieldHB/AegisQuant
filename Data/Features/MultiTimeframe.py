@@ -136,7 +136,15 @@ def add_mtf_features(ltf_df: pd.DataFrame) -> pd.DataFrame:
         # Determine the name of the time column, usually 'index' if it was named None
         time_col_ltf = 'index' if ltf_temp.columns[0] == 'index' else ltf_temp.columns[0]
         time_col_htf = 'index' if htf_temp.columns[0] == 'index' else htf_temp.columns[0]
-        
+
+        # Normalize datetime resolution on BOTH merge keys. pandas 2.x treats
+        # datetime64[ms]/[us]/[ns] as incompatible merge keys and raises
+        # "incompatible merge keys ... must be the same type" — which silently
+        # broke every retrain. Force both keys to ns (UTC) before merge_asof.
+        for _df, _col in ((ltf_temp, time_col_ltf), (htf_temp, time_col_htf)):
+            if pd.api.types.is_datetime64_any_dtype(_df[_col]):
+                _df[_col] = pd.to_datetime(_df[_col], utc=True).astype("datetime64[ns, UTC]")
+
         merged = pd.merge_asof(
              ltf_temp.sort_values(time_col_ltf), 
              htf_temp.sort_values(time_col_htf), 
@@ -184,3 +192,4 @@ def add_mtf_features(ltf_df: pd.DataFrame) -> pd.DataFrame:
     # Clean up intermediate redundant columns if desired, but we keep core ones for training
     
     return result
+

@@ -62,8 +62,70 @@ from sklearn.calibration import CalibratedClassifierCV
 MODEL_DIR = CONFIG["AI"]["MODEL_PATH"]
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+# ── Training cost controls (host-friendly defaults) ───────────────────────
+# This box is a CloudLinux/cPanel shared host with an LVE CPU/process cap.
+# n_jobs=_TRAIN_N_JOBS spawns one worker per logical core (8) but only ~1-2 cores are
+# actually granted, so the trainer thrashed and was silently SIGKILLed by LVE
+# on the full dataset. Cap parallelism and CV folds, and shorten history, so a
+# full 7-symbol retrain completes reliably. All knobs are env-overridable.
+_TRAIN_N_JOBS    = int(os.getenv("TRAIN_N_JOBS", "1"))     # worker cap (1 = lowest RSS; LVE PMEM-safe)
+_TRAIN_CALIB_CV  = int(os.getenv("TRAIN_CALIB_CV", "3"))   # CalibratedClassifierCV folds
+_TRAIN_MONTHS    = int(os.getenv("TRAIN_MONTHS", "12"))    # history length (majors need 12mo for enough CUSUM events / class balance)
+_TRAIN_RF_EST    = int(os.getenv("TRAIN_RF_EST", "120"))   # RF trees (was 200) — cut RSS
+_TRAIN_XGB_EST   = int(os.getenv("TRAIN_XGB_EST", "150"))  # XGB rounds (was 300)
+_TRAIN_LGB_EST   = int(os.getenv("TRAIN_LGB_EST", "200"))  # LGB rounds (was 400)
+# ── Labeling controls — make the neutral/"chop" class meaningful ───────────
+# Old labels were ~45/2/53 (neutral≈1%): barriers 1.5x/1.0x vol over 24 bars
+# almost always resolve directionally, forcing the model to predict noise.
+# Symmetric, wider barriers + a shorter horizon make ~20-40% of events time out
+# (no clear move). The model can then learn to abstain on chop — and with the
+# engine's directional-mass gate, that selectivity is where real edge lives.
+_LABEL_K_UP      = float(os.getenv("LABEL_K_UP", "2.0"))   # TP multiplier (was 1.5)
+_LABEL_K_DOWN    = float(os.getenv("LABEL_K_DOWN", "2.0")) # SL multiplier (was 1.0; now symmetric)
+_LABEL_HORIZON   = int(os.getenv("LABEL_HORIZON", "16"))   # max-hold bars (was 24)
+_LABEL_CUSUM_PCT = float(os.getenv("LABEL_CUSUM_PCT", "0.01"))  # CUSUM event threshold
+
+
+def _calibration_method(y_train: pd.Series) -> str:
+    configured = CONFIG.get("MODEL_ADMISSION", {}).get("CALIBRATION_METHOD", "auto")
+    if configured in {"sigmoid", "isotonic"}:
+        return configured
+    min_class = int(y_train.value_counts().min()) if len(y_train) else 0
+    return "isotonic" if len(y_train) >= 3000 and min_class >= 100 else "sigmoid"
+
+
+def _calibration_metrics(model, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
+    probabilities = model.predict_proba(X_test)
+    classes = list(model.classes_)
+    class_to_index = {value: index for index, value in enumerate(classes)}
+    one_hot = np.zeros_like(probabilities, dtype=float)
+    for row_index, label in enumerate(y_test):
+        if label in class_to_index:
+            one_hot[row_index, class_to_index[label]] = 1.0
+    multiclass_brier = float(np.mean(np.sum((probabilities - one_hot) ** 2, axis=1)))
+    confidence = probabilities.max(axis=1)
+    predicted = np.asarray(classes)[probabilities.argmax(axis=1)]
+    correctness = (predicted == np.asarray(y_test)).astype(float)
+    bins = np.linspace(0.0, 1.0, 11)
+    ece = 0.0
+    for lower, upper in zip(bins[:-1], bins[1:]):
+        mask = (confidence >= lower) & (
+            confidence <= upper if upper == 1.0 else confidence < upper
+        )
+        if mask.any():
+            ece += float(mask.mean()) * abs(
+                float(correctness[mask].mean()) - float(confidence[mask].mean())
+            )
+    return {
+        "method": _calibration_method(y_test),
+        "multiclass_brier": multiclass_brier,
+        "expected_calibration_error": float(ece),
+        "mean_confidence": float(confidence.mean()),
+        "max_confidence": float(confidence.max()),
+    }
+
 # --- CRYPTO (Binance REST API — paginated for 12 months of history) ---
-def fetch_crypto(symbol, interval="15m", months=12):
+def fetch_crypto(symbol, interval="15m", months=_TRAIN_MONTHS):
     """
     Fetch up to `months` months of Binance kline data by paginating the API.
     Binance returns max 1000 bars per request; at 15m that covers ~10.4 days.
@@ -205,7 +267,7 @@ def train_random_forest(sector, symbol, df):
     # For a robust normalized approach, we use a rolling multiple of standard deviation
     # Here we just use a simplified absolute threshold for the example based on average close
     avg_price = df['close'].mean()
-    h_thresh = avg_price * 0.01 # 1% moves
+    h_thresh = avg_price * _LABEL_CUSUM_PCT # CUSUM event threshold (default 1% moves)
     events = cusum_filter(df, h=h_thresh)
     
     # Ensure event alignment
@@ -220,9 +282,9 @@ def train_random_forest(sector, symbol, df):
          df=df,
          volatility=volatility,
          events=events,
-         k_up=1.5,      # Take profit multiplier
-         k_down=1.0,    # Stop loss multiplier (tighter)
-         horizon_bars=24, # 24 hours max hold
+         k_up=_LABEL_K_UP,      # Take profit multiplier (symmetric)
+         k_down=_LABEL_K_DOWN,  # Stop loss multiplier (symmetric)
+         horizon_bars=_LABEL_HORIZON, # max hold (shorter → meaningful neutral class)
          fees_bps=8.0,  # 8bps round-trip (4bps taker x2)
          spread_bps=1.0,
          slippage_bps=2.0,
@@ -337,14 +399,23 @@ def train_random_forest(sector, symbol, df):
     # Create the global fallback model — class_weight='balanced' handles label imbalance
     # without dropping any class, preserving the full distribution the model sees in live trading.
     global_model = RandomForestClassifier(
-        n_estimators=200, max_depth=10, n_jobs=-1,
+        n_estimators=_TRAIN_RF_EST, max_depth=10, n_jobs=_TRAIN_N_JOBS,
         class_weight='balanced', random_state=42,
     )
     _global_min_class = int(y_train.value_counts().min())
-    _global_cv = max(2, min(5, _global_min_class))
-    calibrated_global = CalibratedClassifierCV(global_model, method='sigmoid', cv=_global_cv)
+    _global_cv = max(2, min(_TRAIN_CALIB_CV, _global_min_class))
+    global_calibration_method = _calibration_method(y_train)
+    calibrated_global = CalibratedClassifierCV(
+        global_model, method=global_calibration_method, cv=_global_cv
+    )
     calibrated_global.fit(X_train.drop(columns=['regime']), y_train)
     global_acc = calibrated_global.score(X_test.drop(columns=['regime']), y_test)
+    calibration_metrics = _calibration_metrics(
+        calibrated_global,
+        X_test.drop(columns=["regime"]),
+        y_test,
+    )
+    calibration_metrics["method"] = global_calibration_method
 
     # Generate OOS predictions for the global model as a potential fallback
     global_oos_proba, global_oos_signal = cross_val_predict_purged(
@@ -368,20 +439,22 @@ def train_random_forest(sector, symbol, df):
     if _XGB_AVAILABLE:
         try:
             xgb_model = XGBClassifier(
-                n_estimators=300,
+                n_estimators=_TRAIN_XGB_EST,
                 max_depth=6,
                 learning_rate=0.05,
                 subsample=0.8,
                 colsample_bytree=0.8,
                 eval_metric="logloss",
-                n_jobs=-1,
+                n_jobs=_TRAIN_N_JOBS,
                 random_state=42,
             )
             # XGBoost requires non-negative integer labels; remap {-1,0,1} -> {0,1,2}
             _xgb_map = {-1: 0, 0: 1, 1: 2}
             y_train_xgb = y_train.map(_xgb_map)
             y_test_xgb  = y_test.map(_xgb_map)
-            calibrated_xgb = CalibratedClassifierCV(xgb_model, method="sigmoid", cv=_global_cv)
+            calibrated_xgb = CalibratedClassifierCV(
+                xgb_model, method=_calibration_method(y_train), cv=_global_cv
+            )
             calibrated_xgb.fit(X_train.drop(columns=["regime"]), y_train_xgb)
             xgb_acc = calibrated_xgb.score(X_test.drop(columns=["regime"]), y_test_xgb)
             # Restore original class labels so Predictor.py can look up P_long/P_short by class value
@@ -395,18 +468,20 @@ def train_random_forest(sector, symbol, df):
     if _LGB_AVAILABLE:
         try:
             lgb_model = LGBMClassifier(
-                n_estimators=400,
+                n_estimators=_TRAIN_LGB_EST,
                 max_depth=6,
                 learning_rate=0.04,
                 num_leaves=63,
                 subsample=0.8,
                 colsample_bytree=0.8,
                 class_weight="balanced",
-                n_jobs=-1,
+                n_jobs=_TRAIN_N_JOBS,
                 random_state=42,
                 verbosity=-1,
             )
-            calibrated_lgb = CalibratedClassifierCV(lgb_model, method="sigmoid", cv=5)
+            calibrated_lgb = CalibratedClassifierCV(
+                lgb_model, method=_calibration_method(y_train), cv=_TRAIN_CALIB_CV
+            )
             calibrated_lgb.fit(X_train.drop(columns=["regime"]), y_train)
             lgb_acc = calibrated_lgb.score(X_test.drop(columns=["regime"]), y_test)
             dump(calibrated_lgb, os.path.join(MODEL_DIR, f"{base_name}_LGB.joblib"))
@@ -451,9 +526,15 @@ def train_random_forest(sector, symbol, df):
         X_test_r = X_test.loc[state_mask_test].drop(columns=['regime'])
         y_test_r = y_test.loc[state_mask_test]
         
-        # Sufficiency Check
-        if len(X_train_r) < 50:
-            print(f"[WARN] Insufficient data for {state} model on {symbol}. Relying on GLOBAL fallback.")
+        # Sufficiency Check — also bail out when a class is too rare to
+        # cross-validate. The neutral (0) class is ~1% of events, so a regime
+        # subset can hold <2 neutral samples; CalibratedClassifierCV(cv=k) then
+        # raises "less than 2 examples for at least one class" and kills the whole
+        # symbol. Fall back to the GLOBAL model for such regimes.
+        _spec_min_class = int(y_train_r.value_counts().min()) if len(y_train_r) else 0
+        if len(X_train_r) < 50 or y_train_r.nunique() < 2 or _spec_min_class < _TRAIN_CALIB_CV:
+            print(f"[WARN] Insufficient/degenerate data for {state} model on {symbol} "
+                  f"(n={len(X_train_r)}, classes={y_train_r.nunique()}, min_class={_spec_min_class}). Relying on GLOBAL fallback.")
             # Map fallback OOS directly into the overarching Meta vector
             meta_oos_proba.loc[state_mask_train] = global_oos_proba.loc[state_mask_train]
             meta_oos_signal.loc[state_mask_train] = global_oos_signal.loc[state_mask_train]
@@ -467,13 +548,15 @@ def train_random_forest(sector, symbol, df):
             continue
             
         specialist = RandomForestClassifier(
-            n_estimators=200, max_depth=10, n_jobs=-1,
+            n_estimators=_TRAIN_RF_EST, max_depth=10, n_jobs=_TRAIN_N_JOBS,
             class_weight='balanced', random_state=42,
         )
         # Reduce CV folds when any class has fewer than 5 samples to avoid CV error
         _spec_min_class = int(y_train_r.value_counts().min())
-        _spec_cv = max(2, min(5, _spec_min_class))
-        calibrated_specialist = CalibratedClassifierCV(specialist, method='sigmoid', cv=_spec_cv)
+        _spec_cv = max(2, min(_TRAIN_CALIB_CV, _spec_min_class))
+        calibrated_specialist = CalibratedClassifierCV(
+            specialist, method=_calibration_method(y_train_r), cv=_spec_cv
+        )
         calibrated_specialist.fit(X_train_r, y_train_r)
 
         # OOS Predictions exclusively for this Regime Segment
@@ -510,8 +593,10 @@ def train_random_forest(sector, symbol, df):
         events_df=events_train.loc[meta_y_train.index]
     )
     
-    meta_model = RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42, class_weight='balanced', n_jobs=-1)
-    calibrated_meta = CalibratedClassifierCV(meta_model, method='sigmoid', cv=3)
+    meta_model = RandomForestClassifier(n_estimators=200, max_depth=6, random_state=42, class_weight='balanced', n_jobs=_TRAIN_N_JOBS)
+    calibrated_meta = CalibratedClassifierCV(
+        meta_model, method=_calibration_method(meta_y_train), cv=3
+    )
     calibrated_meta.fit(meta_X_train, meta_y_train)
     
     # 7. Evaluate Meta-Model Improvement on Test Holdout
@@ -562,9 +647,11 @@ def train_random_forest(sector, symbol, df):
         try:
             wf_rf = RandomForestClassifier(
                 n_estimators=100, max_depth=8, class_weight="balanced",
-                n_jobs=-1, random_state=42,
+                n_jobs=_TRAIN_N_JOBS, random_state=42,
             )
-            wf_cal = CalibratedClassifierCV(wf_rf, method="sigmoid", cv=3)
+            wf_cal = CalibratedClassifierCV(
+                wf_rf, method=_calibration_method(y_wf_tr), cv=3
+            )
             wf_cal.fit(X_wf_tr, y_wf_tr)
             wf_acc = wf_cal.score(X_wf_te, y_wf_te)
             wf_accs.append(wf_acc)
@@ -622,6 +709,7 @@ def train_random_forest(sector, symbol, df):
             "std_accuracy":  float(wf_std)  if wf_accs else None,
             "consistent": wf_consistent,
         },
+        "calibration": calibration_metrics,
         "feature_importances": pruning_report[:20] if pruning_report else [],
         "low_importance_features": [r["feature"] for r in pruning_report if r["importance"] < 0.005],
     }
@@ -651,3 +739,4 @@ def retrain_all():
 
 if __name__ == "__main__":
     retrain_all()
+

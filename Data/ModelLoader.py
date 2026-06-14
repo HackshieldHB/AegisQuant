@@ -24,14 +24,58 @@ from joblib import load
 from AegisQuantConfig import CONFIG
 from Core.Logger import AG_LOGGER
 
-try:
-    from AI.LSTMModel import AegisLSTM as _AegisLSTM
-    _LSTM_AVAILABLE = True
-except ImportError:
+if CONFIG.get("LSTM_MODEL", {}).get("ENABLED", True):
+    try:
+        from AI.LSTMModel import AegisLSTM as _AegisLSTM
+        _LSTM_AVAILABLE = True
+    except ImportError:
+        _LSTM_AVAILABLE = False
+else:
+    _AegisLSTM = None
     _LSTM_AVAILABLE = False
 
 logger = AG_LOGGER
 MODEL_DIR = CONFIG["AI"]["MODEL_PATH"]
+
+def _model_admitted(sector: str, symbol: str) -> bool:
+    admission = CONFIG.get("MODEL_ADMISSION", {})
+    if not admission.get("ENABLED", True):
+        return True
+
+    base = f"RandomForest_{sector}_{symbol.replace('/', '')}"
+    meta_path = os.path.join(MODEL_DIR, f"{base}_metadata.json")
+    try:
+        with open(meta_path) as f:
+            metadata = json.load(f)
+    except Exception as exc:
+        logger.error(
+            "Model admission rejected %s/%s: metadata unavailable (%s)",
+            sector,
+            symbol,
+            exc,
+        )
+        return False
+
+    test_accuracy = float(metadata.get("global_test_accuracy", 0.0) or 0.0)
+    wf_accuracy = float(
+        metadata.get("walk_forward", {}).get("mean_accuracy", 0.0) or 0.0
+    )
+    train_samples = int(metadata.get("n_train", 0) or 0)
+    admitted = (
+        test_accuracy >= float(admission.get("MIN_TEST_ACCURACY", 0.51))
+        and wf_accuracy >= float(admission.get("MIN_WALK_FORWARD_ACCURACY", 0.51))
+        and train_samples >= int(admission.get("MIN_TRAIN_SAMPLES", 1000))
+    )
+    if not admitted:
+        logger.error(
+            "MODEL_ADMISSION_REJECTED %s/%s test=%.3f wf=%.3f n=%d",
+            sector,
+            symbol,
+            test_accuracy,
+            wf_accuracy,
+            train_samples,
+        )
+    return admitted
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +229,9 @@ def load_model(sector: str, symbol: str):
 
     Returns None if nothing loadable is found.
     """
+    if not _model_admitted(sector, symbol):
+        return None
+
     base = f"RandomForest_{sector}_{symbol.replace('/', '')}"
 
     ensemble_cfg = CONFIG.get("ENSEMBLE", {})
@@ -249,10 +296,22 @@ def load_model(sector: str, symbol: str):
             return ensemble
 
     # ── Single-model fallback ──────────────────────────────────────────
-    candidates = [
-        os.path.join(MODEL_DIR, f"{base}_GLOBAL.joblib"),
-        os.path.join(MODEL_DIR, f"{base}.joblib"),
+    preferred_type = str(ensemble_cfg.get("SINGLE_MODEL_TYPE", "RF")).upper()
+    preferred_suffix = {
+        "RF": "_GLOBAL.joblib",
+        "XGB": "_XGB.joblib",
+        "LGB": "_LGB.joblib",
+    }.get(preferred_type, "_GLOBAL.joblib")
+    candidate_suffixes = [
+        preferred_suffix,
+        "_GLOBAL.joblib",
+        ".joblib",
     ]
+    candidates = []
+    for suffix in candidate_suffixes:
+        path = os.path.join(MODEL_DIR, f"{base}{suffix}")
+        if path not in candidates:
+            candidates.append(path)
 
     for path in candidates:
         if not os.path.exists(path):
@@ -282,9 +341,18 @@ def load_all_models():
     Returns a dict: {sector: {symbol: model | None}}
     """
     models = {}
+    live_symbols = set(CONFIG["PROJECT"].get("LIVE_SYMBOLS", []))
     for sector, symbols in CONFIG["SYMBOLS"].items():
         if CONFIG["MARKETS"][sector.upper()]:
             models[sector] = {}
             for symbol in symbols.keys():
+                if (
+                    CONFIG["PROJECT"]["MODE"] == "LIVE"
+                    and sector.upper() == "CRYPTO"
+                    and live_symbols
+                    and symbol.upper() not in live_symbols
+                ):
+                    models[sector][symbol] = None
+                    continue
                 models[sector][symbol] = load_model(sector, symbol)
     return models

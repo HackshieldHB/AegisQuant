@@ -11,6 +11,7 @@ TelegramService — PRODUCTION Async Alerts & Notifications
 """
 
 import queue
+import hmac
 import threading
 import time
 from datetime import datetime, timezone
@@ -475,6 +476,13 @@ class TelegramService:
                 for upd in updates:
                     offset = upd["update_id"] + 1
                     msg = upd.get("message", {})
+                    if not self._is_authorized_message(msg):
+                        sender = msg.get("chat", {}).get("id")
+                        self.logger.warning(
+                            "Rejected Telegram command from unauthorized chat_id=%s",
+                            sender,
+                        )
+                        continue
                     text = (msg.get("text") or "").strip()
                     if not text.startswith("/"):
                         continue
@@ -497,6 +505,12 @@ class TelegramService:
             except Exception as pe:
                 self.logger.debug("Telegram poll error: %s", pe)
                 time.sleep(10)
+
+    def _is_authorized_message(self, message: Dict[str, Any]) -> bool:
+        """Accept control commands only from the configured owner chat."""
+        supplied = str(message.get("chat", {}).get("id", ""))
+        expected = str(self.chat_id)
+        return bool(expected and supplied and hmac.compare_digest(expected, supplied))
 
     def _fetch_initial_offset(self, get_url: str) -> int:
         """Skip all pending updates; start fresh from the next one."""
