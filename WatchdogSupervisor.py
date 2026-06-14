@@ -30,7 +30,7 @@ from typing import Optional, List
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from AegisQuantConfig import CONFIG
-from Core.Logger import AG_LOGGER
+from Core.Logger import AG_LOGGER, setup_logger
 from Services.TelegramService import TelegramService
 from Core.Singleton import SingletonLock, SingletonException
 
@@ -56,8 +56,19 @@ class WatchdogSupervisor:
         "engine_heartbeat.json"
     )
     
+    WATCHDOG_LOG = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "logs",
+        "watchdog_prod.log"
+    )
+
     def __init__(self, engine_script: str = "Main.py") -> None:
-        self.logger = AG_LOGGER
+        # Dedicated watchdog logger writing to watchdog_prod.log (the file the
+        # dashboard tails as WATCHDOG_LOG).  Previously the watchdog shared
+        # AG_LOGGER → aegis_quant.log with the engine subprocess, which gave that
+        # file two cross-process writers and caused the WinError 32 rotation
+        # contention.  Each process now owns exactly one log file.
+        self.logger = setup_logger("AegisQuant.Watchdog", log_file=self.WATCHDOG_LOG)
         self.telegram = TelegramService()
         self.engine_script = engine_script
         self.engine_process: Optional[subprocess.Popen] = None
@@ -128,15 +139,14 @@ class WatchdogSupervisor:
                 for line in iter(stream.readline, ''):
                     if not line:
                         continue
-                    line_stripped = line.rstrip("\n")
-                    # Write to dedicated subprocess log file
+                    # Write to the dedicated subprocess log file only. This is
+                    # the file the dashboard tails (ENGINE_LOG), and the engine
+                    # already writes its own structured events to aegis_quant.log.
+                    # We deliberately do NOT echo each line into the watchdog
+                    # logger: doing so duplicated every engine line and made the
+                    # watchdog a second writer to aegis_quant.log, which triggered
+                    # the WinError 32 rotation failures.
                     f.write(line)
-                    # Also echo into the main watchdog logger so everything
-                    # appears in aegis_quant.log and the console in one place.
-                    if stream_name == "STDERR":
-                        self.logger.warning("[ENGINE] %s", line_stripped)
-                    else:
-                        self.logger.info("[ENGINE] %s", line_stripped)
 
         except Exception as e:
             self.logger.debug("Error capturing %s: %s", stream_name, e)

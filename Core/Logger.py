@@ -9,8 +9,60 @@ AegisQuant Structured Logger (Production)
 import logging
 import os
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Optional
+
+
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler hardened for Windows multi-process access.
+
+    Root cause of the 377x PermissionError [WinError 32] flood in production:
+    the engine subprocess, the WatchdogSupervisor parent, AND the web dashboard
+    (`Dashboard/aegis_wsgi.py` tails the file) all hold a handle to
+    ``aegis_quant.log`` at the same time.  When the stock RotatingFileHandler
+    calls ``os.rename(log -> log.1)`` Windows refuses the rename while any other
+    handle is open, the rollover raises, and the whole ``emit`` aborts with a
+    traceback on every single log call once the file passes maxBytes.
+
+    Fix: make rollover best-effort.  Retry the rename a few times (the competing
+    reader usually releases within milliseconds), and if it still fails, degrade
+    gracefully instead of crashing:
+      * keep writing to the current file (never lose log lines), and
+      * if the file has grown far past the limit and rename keeps failing,
+        truncate in place so it cannot grow without bound.
+    A failed rotation is logged once to stderr, not raised into the app.
+    """
+
+    def doRollover(self) -> None:  # noqa: N802 (stdlib name)
+        for attempt in range(3):
+            try:
+                super().doRollover()
+                return
+            except (PermissionError, OSError):
+                if attempt < 2:
+                    time.sleep(0.2)
+                    continue
+                # Rotation still blocked by another handle. Reopen the stream so
+                # logging continues, and prevent unbounded growth as a backstop.
+                try:
+                    if self.stream:
+                        self.stream.close()
+                        self.stream = None  # type: ignore[assignment]
+                    if os.path.exists(self.baseFilename) and \
+                            os.path.getsize(self.baseFilename) > self.maxBytes * 2:
+                        # Last resort: truncate rather than rotate.
+                        with open(self.baseFilename, "w", encoding="utf-8"):
+                            pass
+                    if not self.delay:
+                        self.stream = self._open()
+                except Exception:
+                    pass
+                sys.stderr.write(
+                    "[Logger] log rotation skipped (file locked by another "
+                    "process); continuing without rotation.\n"
+                )
+                return
 
 # Import CONFIG after it is fully loaded (avoid circular import: load Logger after Config)
 def _get_config() -> Dict[str, Any]:
@@ -98,11 +150,12 @@ def setup_logger(
     if log_dir and not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    file_handler = RotatingFileHandler(
+    file_handler = SafeRotatingFileHandler(
         file_path,
         maxBytes=10 * 1024 * 1024,
         backupCount=5,
         encoding="utf-8",
+        delay=True,  # open lazily; reduces the window where the handle is held
     )
     file_handler.setLevel(numeric_level)
     file_handler.setFormatter(formatter)
