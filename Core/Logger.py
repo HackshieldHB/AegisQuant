@@ -88,8 +88,18 @@ def setup_logger(
     logger = logging.getLogger(name)
     logger.setLevel(numeric_level)
 
-    if logger.hasHandlers():
+    # Use logger.handlers (THIS logger's own handlers) rather than
+    # logger.hasHandlers() — the latter returns True when any *ancestor* has
+    # handlers, so a child logger like "AegisQuant.Watchdog" would short-circuit
+    # here and never receive its own file handler, silently propagating all its
+    # records up to the parent's aegis_quant.log instead of its dedicated file.
+    if logger.handlers:
         return logger
+
+    # Each named logger writes only to its own handlers; do not bubble records up
+    # to ancestor loggers (which would re-route a child's lines into the parent's
+    # log file and reintroduce a second cross-process writer to aegis_quant.log).
+    logger.propagate = False
 
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
