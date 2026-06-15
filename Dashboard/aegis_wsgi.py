@@ -670,6 +670,22 @@ a{color:inherit}
 .sig{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:3px 9px;font-size:10px;font-weight:800;letter-spacing:.03em;border:1px solid var(--line);white-space:nowrap}
 .sig-strbuy{color:#06120d;background:var(--green);border-color:var(--green)}.sig-buy{color:var(--green);background:var(--greenbg);border-color:#1c5a45}
 .sig-neutral{color:var(--muted);background:var(--panel);border-color:var(--line)}.sig-sell{color:var(--red);background:var(--redbg);border-color:#5a2230}.sig-strsell{color:#fff;background:var(--red);border-color:var(--red)}
+/* Signal decision cards */
+.scards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:13px}
+.scard{border:1px solid var(--line);border-radius:14px;padding:15px 16px;background:linear-gradient(180deg,var(--panel),var(--panel2));position:relative;overflow:hidden}
+.scard::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--ac,var(--muted))}
+.scard .sh{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.scard .sym{font-size:16px;font-weight:850;letter-spacing:-.2px}
+.scard .px{font-size:11.5px;color:var(--muted)}
+.act{font-size:12px;font-weight:850;letter-spacing:.04em;border-radius:8px;padding:5px 11px;border:1px solid transparent}
+.act-buy{color:#06120d;background:var(--green)}.act-sell{color:#fff;background:var(--red)}.act-hold{color:var(--amber);background:var(--amberbg);border-color:#5a4418}.act-avoid{color:var(--muted);background:var(--panel);border-color:var(--line2)}
+.cfwrap{margin:12px 0 6px}
+.cfhead{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:5px}
+.cfbar{height:9px;background:var(--bg2);border-radius:999px;position:relative;overflow:hidden}
+.cffill{height:100%;border-radius:999px}
+.cfgate{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);opacity:.55}
+.scard .why{font-size:11.5px;color:var(--muted);line-height:1.45;margin-top:9px;min-height:32px}
+.scard .mom{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:11px;padding-top:11px;border-top:1px solid var(--line);font-size:11px;color:var(--faint)}
 /* Tables */
 .scrollTable{max-height:560px;overflow:auto;border-radius:10px;border:1px solid var(--line)}
 table{width:100%;border-collapse:collapse;font-size:12px}
@@ -755,9 +771,12 @@ tbody tr:hover td{background:rgba(67,200,240,.04)}
   </section>
 
   <section id="signals" class="view">
-    <section class="panel"><div class="ph"><div><h2>Signal Recommendations</h2><p class="sub">Action guidance from the live engine. Momentum bias is market context; the ML execution signal is what governs orders.</p></div></div><div id="recommendations2" class="rec"></div></section>
-    <section class="panel"><div class="ph"><div><h2>Signal Readiness</h2><p class="sub">Confidence and technical support per symbol versus the entry gate.</p></div></div><div id="readinessTable2"></div></section>
-    <section class="panel"><div class="ph"><h2>Signal History</h2></div><div class="scrollTable" id="scanTable"></div></section>
+    <section class="panel"><div class="ph"><div><h2>Signal Recommendations</h2><p class="sub">Per-symbol decision from the live ML engine: <b>Buy / Sell / Hold / Avoid</b>, with directional confidence versus the entry gate. <span class="tip" data-tip="The ML execution signal governs orders. Momentum bias (shown below each card) is short-term market context and can disagree — agreement is not required to act.">i</span> The momentum bias shown is market context, separate from the ML signal.</p></div></div><div id="signalCards" class="scards"></div></section>
+    <div class="grid2">
+      <section class="panel"><div class="ph"><div><h2>Signal Readiness</h2><p class="sub">Confidence and technical support per symbol versus the entry gate.</p></div></div><div id="readinessTable2"></div></section>
+      <section class="panel"><div class="ph"><div><h2>Engine Notices</h2><p class="sub">Operational guidance from the runtime.</p></div></div><div id="engineNotices" class="rec"></div></section>
+    </div>
+    <section class="panel"><div class="ph"><div><h2>Signal History</h2><p class="sub">Most recent per-cycle scan decisions across the watchlist.</p></div></div><div class="scrollTable" id="scanTable"></div></section>
   </section>
 
   <section id="models" class="view">
@@ -828,7 +847,6 @@ function readinessHtml(dx){return table(["Asset","num Confidence","num TA suppor
 function renderOverview(){
   const dx=s.execution_diagnostics||{},rk=s.risk||{};
   $("recommendations").innerHTML=(s.recommendations||[]).map(recHtml).join("")||"<div class='empty'>No recommendations.</div>";
-  $("recommendations2").innerHTML=$("recommendations").innerHTML;
   const blocks=dx.blockers||[],mb=Math.max(1,...blocks.map(b=>b.count));
   $("executionVerdict").innerHTML=dx.best_symbol?`<div class="verdict wait"><h3>Waiting for a qualified setup</h3><p>${esc(dx.best_symbol)} leads at ${dx.best_confidence||0}%. Entry requires ${dx.required_confidence||"—"}% (a ${dx.confidence_gap||0}-pt gap). No order has reached the exchange.</p></div>`:"<div class='empty'>Awaiting complete scan diagnostics.</div>";
   $("executionDiagnosis").innerHTML=`<div class="funnel">${blocks.slice(0,5).map(b=>`<div class="funnelRow"><span>${esc(b.reason)}</span><div class="funnelTrack"><div class="funnelFill" style="width:${b.count/mb*100}%"></div></div><b class="mono">${b.count}</b></div>`).join("")||"<div class='empty'>No blockers recorded.</div>"}</div>`;
@@ -843,8 +861,42 @@ function renderMarkets(){
   $("heatmap").innerHTML=(s.market||[]).map(m=>{const ch=num(m.change),a=Math.min(Math.abs(ch)/8,.85),bg=ch>=0?`rgba(39,217,140,${.08+a*.4})`:`rgba(255,93,110,${.08+a*.4})`;return `<div class="heatCell" style="background:linear-gradient(180deg,${bg},var(--panel2))"><b>${esc(m.symbol)}</b><div class="hp mono">${fnum(m.price)}</div><strong class="mono ${cls(ch)}">${spct(ch)}</strong>${sigBadge(m)}</div>`}).join("")||"<div class='empty'>Live market data unavailable.</div>";
   $("marketTable").innerHTML=table(["Asset","num Last","num 24h","Signal","num High","num Low","num Quote vol"],(s.market||[]).map(m=>`<tr><td><b>${esc(m.symbol)}</b></td><td class="num">${fnum(m.price)}</td><td class="num ${cls(m.change)}">${spct(m.change)}</td><td>${sigBadge(m)}</td><td class="num">${fnum(m.high)}</td><td class="num">${fnum(m.low)}</td><td class="num">$${comp(m.volume)}</td></tr>`),"Live market data unavailable.");
 }
+function cleanReason(rsn){let r=String(rsn||"");
+  if(/No CUSUM event/i.test(r))return "No qualifying market event yet. The model only acts at significant moves it was trained on.";
+  if(/No model found|not admitted/i.test(r))return "No admitted model for this symbol — excluded from trading.";
+  if(/AI-only gate/i.test(r))return "Directional confidence is below the entry gate. Holding for a stronger setup.";
+  if(/MTF conflict/i.test(r))return "Higher-timeframe trend disagrees with the signal. Holding.";
+  if(/conflict/i.test(r))return "Indicator and model directions conflict. Holding.";
+  return r.length>120?r.slice(0,118)+"…":r;
+}
 function renderSignals(){
-  $("scanTable").innerHTML=table(["Time","Pair","Signal","num Conf","Reason"],(s.scan_rows||[]).slice().reverse().map(r=>{const sg=String(r[2]||""),sc=sg==="BUY"||sg==="SELL"?"b-ok":(sg==="FAILED"?"b-bad":"b-mut");return `<tr><td class="mono">${esc(r[0])}</td><td><b>${esc(r[1])}</b></td><td><span class="b ${sc}">${esc(sg)}</span></td><td class="num">${esc(r[3])}%</td><td class="faint">${esc(r[4])}</td></tr>`}),"No scan rows yet.");
+  const req=num((s.execution_diagnostics||{}).required_confidence)||74;
+  // latest scan per symbol (scan_rows are chronological → last wins)
+  const latest={};(s.scan_rows||[]).forEach(r=>{if(r&&r[1])latest[r[1]]=r;});
+  const mkt={};(s.market||[]).forEach(m=>{mkt[m.symbol]=m;});
+  const syms=Object.keys(latest).length?Object.keys(latest):(s.market||[]).map(m=>m.symbol);
+  const cards=syms.map(sym=>{
+    const r=latest[sym]||[], sg=String(r[2]||"").toUpperCase(), conf=num(r[3]);
+    const m=mkt[sym]||{};
+    let act="HOLD",ac="act-hold",accent="var(--amber)";
+    if(sg==="BUY"){act="BUY";ac="act-buy";accent="var(--green)";}
+    else if(sg==="SELL"){act="SELL";ac="act-sell";accent="var(--red)";}
+    else if(sg==="FAILED"){act="AVOID";ac="act-avoid";accent="var(--faint)";}
+    const ratio=Math.max(0,Math.min(100,conf)),gatePos=Math.max(0,Math.min(100,req));
+    const fillCol=conf>=req?"var(--green)":(conf>=req-10?"var(--amber)":"var(--red)");
+    const momTxt=m.signal?`${esc(m.signal_arrow||"")} ${esc(m.signal)} (${spct(m.change)})`:"—";
+    const agree=(act==="BUY"&&/BUY/.test(m.signal||""))||(act==="SELL"&&/SELL/.test(m.signal||""));
+    return `<div class="scard" style="--ac:${accent}">
+      <div class="sh"><div><div class="sym">${esc(sym)}</div><div class="px mono">${m.price!=null?fnum(m.price):""}</div></div><span class="act ${ac}">${act}</span></div>
+      <div class="cfwrap"><div class="cfhead"><span>ML confidence</span><span class="mono">${conf?conf+"%":"—"} / gate ${req}%</span></div>
+      <div class="cfbar"><div class="cffill" style="width:${ratio}%;background:${fillCol}"></div><div class="cfgate" style="left:${gatePos}%"></div></div></div>
+      <div class="why">${cleanReason(r[4])}</div>
+      <div class="mom"><span>Momentum bias: <b class="${m.change>=0?'pos':'neg'}">${momTxt}</b></span><span class="${agree?'pos':'faint'}">${m.signal&&act!=="AVOID"?(agree?"aligned":"context only"):""}</span></div>
+    </div>`;
+  });
+  $("signalCards").innerHTML=cards.join("")||"<div class='empty'>No signal data yet — the engine is scanning. Cards appear once the first cycle completes.</div>";
+  $("engineNotices").innerHTML=(s.recommendations||[]).map(recHtml).join("")||"<div class='empty'>No operational notices.</div>";
+  $("scanTable").innerHTML=table(["Time","Pair","Signal","num Conf","Reason"],(s.scan_rows||[]).slice().reverse().map(r=>{const sg=String(r[2]||""),sc=sg==="BUY"||sg==="SELL"?"b-ok":(sg==="FAILED"?"b-bad":"b-mut");return `<tr><td class="mono">${esc(r[0])}</td><td><b>${esc(r[1])}</b></td><td><span class="b ${sc}">${esc(sg)}</span></td><td class="num">${esc(r[3])}%</td><td class="faint">${esc(cleanReason(r[4]))}</td></tr>`}),"No scan rows yet.");
 }
 function renderModels(){
   $("modelGrid").innerHTML=(s.model_health||[]).map(m=>{if(m.status!=="ok")return `<div class="tile"><b>${esc(m.symbol)}</b><div class="bx">model not admitted</div></div>`;const fresh=(m.age_days!=null&&m.age_days<2),acc=m.accuracy,accCls=acc>=55?"pos":(acc<45?"neg":"");return `<div class="tile"><span class="rk">${fresh?"🟢":""} ${m.age_days!=null?m.age_days+"d":""}</span><b>${esc(m.symbol)}</b><div class="bp mono ${accCls}">${acc!=null?acc+"%":"—"}</div><div class="bx mono">acc · WF ${m.wf_mean!=null?m.wf_mean+"%":"—"}</div><div class="bx mono" style="margin-top:6px">Brier ${m.brier??"—"} · ECE ${m.ece??"—"}</div><div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${m.wf_consistent?'<span class="sig sig-buy">consistent</span>':'<span class="sig sig-neutral">unstable</span>'}${m.calibrated?'<span class="sig sig-buy">calibrated</span>':'<span class="sig sig-sell">uncalibrated</span>'}</div></div>`}).join("")||"<div class='empty'>No model metadata found.</div>";
