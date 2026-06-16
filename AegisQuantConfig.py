@@ -120,6 +120,10 @@ RISK = {
     },
     "SUDDEN_DROP_PCT": 0.05,
     "MAX_CONSECUTIVE_LOSSES": 5,
+    # Capital-protection drawdown halt: block new entries if equity falls more
+    # than this fraction below its high-water mark (0 disables). On a $15 start
+    # this floors at ~$12 (-20%); the floor rises if the account grows.
+    "DRAWDOWN_HALT_PCT": float(os.getenv("DRAWDOWN_HALT_PCT", "0.20")),
 }
 
 # ==================================================
@@ -402,8 +406,13 @@ ENSEMBLE = {
 # ==================================================
 MODEL_ADMISSION = {
     "ENABLED": str(os.getenv("MODEL_ADMISSION_ENABLED", "True")).lower() == "true",
-    "MIN_TEST_ACCURACY": float(os.getenv("MODEL_MIN_TEST_ACCURACY", "0.51")),
-    "MIN_WALK_FORWARD_ACCURACY": float(os.getenv("MODEL_MIN_WF_ACCURACY", "0.51")),
+    # Thresholds are for the 3-class {-1,0,1} task (random baseline = 0.333 after
+    # the labeling rebuild added a real ~15% neutral class). 0.42 ≈ 1.26x random
+    # — a coarse "has signal" pre-filter. The shadow scorecard is the true
+    # profitability gate downstream. (Old 0.51 was tuned for near-binary labels
+    # where random ≈ 0.50, and wrongly rejected the new 3-class models.)
+    "MIN_TEST_ACCURACY": float(os.getenv("MODEL_MIN_TEST_ACCURACY", "0.42")),
+    "MIN_WALK_FORWARD_ACCURACY": float(os.getenv("MODEL_MIN_WF_ACCURACY", "0.42")),
     "MIN_TRAIN_SAMPLES": int(os.getenv("MODEL_MIN_TRAIN_SAMPLES", "1000")),
     "CALIBRATION_METHOD": os.getenv("MODEL_CALIBRATION_METHOD", "auto").lower(),
 }
@@ -433,7 +442,7 @@ SIGNAL_GATES = {
     "MTF_CONSENSUS_REQUIRED": True,         # 1H direction must agree with entry signal
     "MTF_CONSENSUS_OVERRIDE_CONF": 0.78,    # AI confidence that bypasses MTF check (lowered from 0.82)
     "MIN_DIRECTIONAL_MASS": 0.50,
-    "AI_ONLY_DIRECTIONAL_CONF": 0.74,
+    "AI_ONLY_DIRECTIONAL_CONF": float(os.getenv("AI_ONLY_DIRECTIONAL_CONF", "0.60")),  # lowered 0.74->0.60: shadow scorecard ready=True, +expectancy at 0.57-0.64 (567 samples); 0.74 was unreachable (model ceiling ~65%)
     # CUSUM live-event gate (train/serve alignment).
     # The models are trained ONLY on CUSUM-sampled event bars (≈1% cumulative
     # move, see AegisQuantTrainer.cusum_filter). Off-event bars are out-of-
