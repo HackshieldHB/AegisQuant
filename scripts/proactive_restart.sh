@@ -26,9 +26,11 @@ if ! pgrep -u "$(id -u)" -f "WatchdogSupervisor.py" >/dev/null; then
     exit 0
 fi
 
-if pgrep -u "$(id -u)" -f "aegisquant_app/Main.py" >/dev/null; then
-    rss=$(ps -o rss= -p "$(pgrep -u "$(id -u)" -f 'aegisquant_app/Main.py' | head -1)" 2>/dev/null | tr -d ' ')
-    echo "$(ts) | SIGTERM engine for scheduled memory reset (rss=${rss:-?}KB)" >> "${LOG}"
+epid="$(pgrep -u "$(id -u)" -f 'aegisquant_app/Main.py' | head -1)"
+if [ -n "${epid}" ]; then
+    # Read true RSS from /proc (ps piped through a racing pgrep was unreliable).
+    rss_kb="$(awk '/^VmRSS:/{print $2}' "/proc/${epid}/status" 2>/dev/null)"
+    echo "$(ts) | SIGTERM engine pid=${epid} (rss=${rss_kb:-?}KB) for scheduled memory reset" >> "${LOG}"
     pkill -TERM -u "$(id -u)" -f "aegisquant_app/Main.py"
 else
     echo "$(ts) | skip: engine not running, watchdog will handle" >> "${LOG}"
