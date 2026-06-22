@@ -2448,6 +2448,15 @@ class AsyncEngine:
                     and symbol.upper() not in live_symbols
                 ):
                     continue
+                # Skip symbols with no admitted/loaded model. Without this guard
+                # an admission-rejected symbol (e.g. a model below the accuracy
+                # floor) is scanned every cycle, the predictor raises
+                # "No model found", and the engine logs a CRITICAL/ERROR pair on
+                # every pass — pure noise that can never produce a trade.
+                # Models are loaded once at boot (and hot-swapped on retrain);
+                # the missing-model set is already logged CRITICAL at startup.
+                if self.models.get(asset_class, {}).get(symbol) is None:
+                    continue
                 tf = timeframes[-1] if timeframes else "5m"
                 tasks.append(self._process_symbol(asset_class, symbol, tf, cycle_trace_id))
 
